@@ -2,8 +2,19 @@
   #:use-module (ice-9 format)
   #:use-module (ice-9 popen)
   #:use-module (ice-9 textual-ports)
+  #:use-module (srfi srfi-9)
   #:use-module (live-agent json)
-  #:export (execute-tool))
+  #:export (make-tool-result
+            tool-result?
+            tool-result-success?
+            tool-result-output
+            execute-tool))
+
+(define-record-type <tool-result>
+  (make-tool-result success? output)
+  tool-result?
+  (success? tool-result-success?)
+  (output tool-result-output))
 
 (define max-tool-output (* 64 1024))
 
@@ -74,11 +85,13 @@
 (define (execute-tool name arguments working-directory shell-policy confirm)
   (catch #t
     (lambda ()
-      (cond
-       ((string=? name "read")
-        (read-project-file arguments working-directory))
-       ((string=? name "shell")
-        (run-shell arguments working-directory shell-policy confirm))
-       (else (error "tool is not implemented" name))))
+      (make-tool-result
+       #t
+       (cond
+        ((string=? name "read")
+         (read-project-file arguments working-directory))
+        ((string=? name "shell")
+         (run-shell arguments working-directory shell-policy confirm))
+        (else (error "tool is not implemented" name)))))
     (lambda (key . args)
-      (format #f "tool error (~a): ~s" key args))))
+      (make-tool-result #f (format #f "tool error (~a): ~s" key args)))))

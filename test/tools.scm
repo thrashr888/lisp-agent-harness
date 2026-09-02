@@ -15,7 +15,9 @@
    (lambda _ #f)))
 
 (test-assert "read stays inside project"
-  (string-contains read-result "# Lisp Agent Harness"))
+  (and (tool-result-success? read-result)
+       (string-contains (tool-result-output read-result)
+                        "# Lisp Agent Harness")))
 
 (define escaped-read
   (execute-tool
@@ -26,7 +28,9 @@
    (lambda _ #f)))
 
 (test-assert "read rejects paths outside project"
-  (string-contains escaped-read "escapes the project root"))
+  (and (not (tool-result-success? escaped-read))
+       (string-contains (tool-result-output escaped-read)
+                        "escapes the project root")))
 
 (define confirm-called? #f)
 (define denied-shell
@@ -38,7 +42,9 @@
    (lambda _ (set! confirm-called? #t) #t)))
 
 (test-assert "deny policy blocks shell"
-  (string-contains denied-shell "denied by the live image"))
+  (and (not (tool-result-success? denied-shell))
+       (string-contains (tool-result-output denied-shell)
+                        "denied by the live image")))
 (test-assert "deny policy never prompts" (not confirm-called?))
 
 (test-end "tools")

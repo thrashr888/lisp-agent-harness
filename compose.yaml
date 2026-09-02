@@ -8,6 +8,18 @@ services:
       PHOENIX_WORKING_DIR: /mnt/data
     volumes:
       - phoenix_data:/mnt/data
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:6006/healthz', timeout=2)
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
     restart: unless-stopped
 
 volumes:

@@ -2,6 +2,7 @@
   #:use-module (ice-9 exceptions)
   #:use-module (ice-9 format)
   #:use-module (ice-9 readline)
+  #:use-module (ice-9 textual-ports)
   #:use-module (live-agent json)
   #:use-module (live-agent generation)
   #:use-module (live-agent provider)
@@ -150,9 +151,15 @@
 (define (tool-name value)
   (if (symbol? value) (symbol->string value) value))
 
+(define (read-user-line prompt)
+  (if (isatty? (current-input-port))
+      (readline prompt)
+      (get-line (current-input-port))))
+
 (define (confirm-shell command)
   (format #t "\nShell requests:\n  ~a~%" command)
-  (let ((answer (readline "Approve this command? [y/N] ")))
+  (force-output)
+  (let ((answer (read-user-line "Approve this command? [y/N] ")))
     (and (string? answer)
          (member (string-downcase (string-trim-both answer)) '("y" "yes")))))
 
@@ -187,7 +194,7 @@
     (catch #t
       (lambda ()
         (let ((activated (runtime-eval! runtime expression)))
-          (cons
+          (make-tool-result
            #t
            (format #f
                    "Activated generation ~a (~a) for the next user turn. Current turn remains pinned to generation ~a; /rollback undoes it."
@@ -195,7 +202,9 @@
                    reason
                    (generation-id generation)))))
       (lambda (key . arguments)
-        (cons #f (format #f "live evaluation rejected (~a): ~s" key arguments))))))
+        (make-tool-result
+         #f
+         (format #f "live evaluation rejected (~a): ~s" key arguments))))))
 
 (define (execute-tool-calls runtime tracer parent generation provider calls
                             messages enabled-tools)
@@ -221,16 +230,14 @@
                   (if (string=? name "live_eval")
                       (execute-live-eval
                        runtime generation (tool-call-arguments call))
-                      (cons
-                       #t
-                       (execute-tool
-                        name
-                        (tool-call-arguments call)
-                        (getcwd)
-                        (generation-ref generation 'agent-shell-policy)
-                        confirm-shell))))
-                 (ok? (car outcome))
-                 (output (cdr outcome)))
+                      (execute-tool
+                       name
+                       (tool-call-arguments call)
+                       (getcwd)
+                       (generation-ref generation 'agent-shell-policy)
+                       confirm-shell)))
+                 (ok? (tool-result-success? outcome))
+                 (output (tool-result-output outcome)))
             (trace-end! span (if ok? "OK" "ERROR")
                         `((output.value . ,output)))
             (runtime-record!
@@ -332,8 +339,13 @@
          (system
           (make-message
            "system" (generation-ref generation 'agent-system-prompt)))
+         (transformed-line
+          (generation-call generation 'agent-transform-user line))
          (working
-          (append (list system) history (list (make-message "user" line)))))
+          (append
+           (list system)
+           history
+           (list (make-message "user" transformed-line)))))
     (let loop ((messages working) (round 0))
       (let* ((outcome
               (complete-with-trace
@@ -392,8 +404,9 @@
 (define (repl runtime tracer)
   (show-generation runtime)
   (display "Enter text to exercise the live image, or /help.\n")
+  (force-output)
   (let loop ((turn-count 1) (history '()))
-    (let ((line (readline "live-agent> ")))
+    (let ((line (read-user-line "live-agent> ")))
       (cond
        ((eof-object? line) (newline))
        ((string-null? (string-trim-both line)) (loop turn-count history))

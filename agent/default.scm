@@ -7,7 +7,7 @@
 (define agent-base-url "http://127.0.0.1:11434")
 (define agent-api-key-environment #f)
 (define agent-stream? #t)
-(define agent-thinking 'low)
+(define agent-thinking #t)
 (define agent-max-tool-rounds 6)
 
 (define agent-system-prompt
@@ -19,6 +19,10 @@
    "for the next user turn and can be rolled back. The prompt binding is exactly "
    "agent-system-prompt; use (set! agent-system-prompt (string-append "
    "agent-system-prompt \" ...\")) to extend it. Never guess starred binding names. "
+   "Prefer the read tool for known or conventional project-relative files. Use "
+   "one most-likely path at a time instead of guessing several paths in parallel. "
+   "Use shell only when the narrower tools cannot perform the task. Thinking is "
+   "already carried separately; never emit think tags or repeat a final answer in content. "
    "This project is Scheme running on GNU Guile; guild's .go outputs are Guile object files, not Go source or binaries."))
 
 ;; Tool names are data owned by the live image. The stable runtime owns their

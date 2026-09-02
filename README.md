@@ -68,8 +68,9 @@ a 262K context window in the local Ollama metadata. It was chosen over the
 practical. The live harness has been exercised end to end with this model making
 a `read` tool call and incorporating the result.
 
-Native Ollama output streams by default. `agent-thinking` may be `'low`,
-`'medium`, `'high`, or `#f`; `agent-stream?` controls streaming. All are live:
+Native Ollama output streams by default. `agent-thinking` may be `#t`, `#f`, or
+the model-specific levels `'low`, `'medium`, and `'high`; `agent-stream?`
+controls streaming. All are live:
 
 ```text
 /eval (define agent-model "your-model-id")
@@ -112,9 +113,9 @@ official Phoenix container (requires Docker):
 make phoenix
 ```
 
-This starts Phoenix in the background on `http://localhost:6006` and stores its
-database in a persistent Docker volume. Then launch the harness with OTLP export
-enabled:
+This starts Phoenix in the background, waits for its health check, exposes it at
+`http://localhost:6006`, and stores its database in a persistent Docker volume.
+Then launch the harness with OTLP export enabled:
 
 ```sh
 make run-traced
@@ -122,7 +123,8 @@ make run-traced
 
 Open `http://localhost:6006` and select the `lisp-agent-harness` project. The
 small Python bridge is dependency-isolated by `uv` and sends OTLP/HTTP protobuf
-to Phoenix; tracing is still fully functional as local JSONL when it is absent.
+to Phoenix asynchronously; tracing is still fully functional as local JSONL
+when it is absent. `make run-traced` fails fast if local Phoenix is not healthy.
 Set `LISP_AGENT_OTEL_ENDPOINT` or `PHOENIX_COLLECTOR_ENDPOINT` to export to a
 different collector.
 

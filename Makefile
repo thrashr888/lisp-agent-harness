@@ -1,13 +1,16 @@
-.PHONY: run run-traced phoenix phoenix-down phoenix-logs test check
+.PHONY: run run-traced phoenix phoenix-check phoenix-down phoenix-logs test check
 
 run:
 	./bin/lisp-agent
 
-run-traced:
+run-traced: phoenix-check
 	LISP_AGENT_OTEL_ENDPOINT=http://127.0.0.1:6006 ./bin/lisp-agent
 
 phoenix:
-	docker compose up -d phoenix
+	docker compose up -d --wait phoenix
+
+phoenix-check:
+	curl --fail --silent --show-error --max-time 2 http://127.0.0.1:6006/healthz >/dev/null
 
 phoenix-down:
 	docker compose down

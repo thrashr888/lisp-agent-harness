@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections import defaultdict
 
@@ -18,7 +19,7 @@ from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Status, StatusCode
 
 
@@ -69,8 +70,20 @@ def main() -> int:
             }
         )
     )
+    # The exporter is optional observability, never part of the agent's critical
+    # path. Keep collector failures quiet and bound shutdown latency.
+    logging.getLogger(
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter"
+    ).setLevel(logging.CRITICAL)
+    exporter = OTLPSpanExporter(endpoint=collector_url(args.endpoint), timeout=1)
     provider.add_span_processor(
-        SimpleSpanProcessor(OTLPSpanExporter(endpoint=collector_url(args.endpoint)))
+        BatchSpanProcessor(
+            exporter,
+            max_queue_size=256,
+            schedule_delay_millis=200,
+            max_export_batch_size=64,
+            export_timeout_millis=1000,
+        )
     )
     trace.set_tracer_provider(provider)
     tracer = trace.get_tracer("lisp-agent-harness")
@@ -85,7 +98,6 @@ def main() -> int:
             pending[trace_id].append(record)
             if record.get("parent_span_id") is None:
                 export_trace(tracer, pending.pop(trace_id))
-                provider.force_flush()
     finally:
         for records in pending.values():
             export_trace(tracer, records)

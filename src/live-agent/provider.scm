@@ -15,7 +15,9 @@
             completion-usage
             make-message
             make-tool-result-message
+            make-ollama-request
             parse-completion-response
+            parse-ollama-response
             provider-complete))
 
 (define-record-type <tool-call>
@@ -57,7 +59,10 @@
      (cons "function"
            (json-object
             (cons "name" "read")
-            (cons "description" "Read a UTF-8 text file inside the current project")
+            (cons "description"
+                  (string-append
+                   "Read one exact UTF-8 text file inside the current project. "
+                   "Try the most likely path first; only try another path if it fails."))
             (cons "parameters"
                   (json-object
                    (cons "type" "object")
@@ -75,7 +80,11 @@
      (cons "function"
            (json-object
             (cons "name" "shell")
-            (cons "description" "Run a shell command after explicit user approval")
+            (cons "description"
+                  (string-append
+                   "Run a shell command after explicit user approval. Use only "
+                   "when read cannot accomplish the task; do not use shell to "
+                   "discover or read a conventional project file."))
             (cons "parameters"
                   (json-object
                    (cons "type" "object")
@@ -300,24 +309,43 @@
               (cons "arguments" (tool-call-arguments call))))))
     calls)))
 
-(define (provider-complete-ollama model base-url api-key messages tool-names
-                                  stream? thinking on-content on-thinking)
+(define (make-ollama-request model messages tool-names stream? thinking)
   (let* ((tool-values (map tool-schema tool-names))
-         (base-fields
-          (list
-           (cons "model" model)
-           (cons "messages" (apply json-array messages))
-           (cons "stream" stream?)))
          (fields
           (append
-           base-fields
-           (if thinking
-               (list (cons "think" (symbol->string thinking)))
-               '())
+           (list
+            (cons "model" model)
+            (cons "messages" (apply json-array messages))
+            (cons "stream" stream?)
+            (cons "think"
+                  (if (symbol? thinking)
+                      (symbol->string thinking)
+                      thinking)))
            (if (null? tool-values)
                '()
-               (list (cons "tools" (apply json-array tool-values))))))
-         (payload (json-write (apply json-object fields)))
+               (list (cons "tools" (apply json-array tool-values)))))))
+    (apply json-object fields)))
+
+(define (parse-ollama-response text)
+  (let* ((root (json-read text))
+         (provider-error (json-object-ref root "error" #f)))
+    (when provider-error
+      (error "provider returned an error" provider-error))
+    (let* ((message (json-object-ref root "message"))
+           (content (json-object-ref message "content" ""))
+           (thought (json-object-ref message "thinking" ""))
+           (calls
+            (map parse-ollama-tool-call
+                 (json-array-items
+                  (json-object-ref message "tool_calls" (json-array))))))
+      (make-completion content thought calls message root))))
+
+(define (provider-complete-ollama model base-url api-key messages tool-names
+                                  stream? thinking on-content on-thinking)
+  (let* ((payload
+          (json-write
+           (make-ollama-request
+            model messages tool-names stream? thinking)))
          (endpoint (string-append (without-trailing-slash base-url) "/api/chat")))
     (if stream?
         (let ((content-port (open-output-string))
@@ -365,18 +393,8 @@
                          (cons "tool_calls"
                                (tool-calls->ollama-json calls))))))))
             (make-completion content thought calls assistant usage)))
-        (let* ((root (json-read (curl-post-json endpoint api-key payload)))
-               (provider-error (json-object-ref root "error" #f)))
-          (when provider-error
-            (error "provider returned an error" provider-error))
-          (let* ((message (json-object-ref root "message"))
-                 (content (json-object-ref message "content" ""))
-                 (thought (json-object-ref message "thinking" ""))
-                 (calls
-                  (map parse-ollama-tool-call
-                       (json-array-items
-                        (json-object-ref message "tool_calls" (json-array))))))
-            (make-completion content thought calls message root))))))
+        (parse-ollama-response
+         (curl-post-json endpoint api-key payload)))))
 
 (define (provider-complete-openai model base-url api-key messages tool-names)
   (let* ((tool-values (map tool-schema tool-names))
