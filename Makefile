@@ -1,4 +1,4 @@
-.PHONY: run run-traced phoenix test check
+.PHONY: run run-traced phoenix phoenix-down phoenix-logs test check
 
 run:
 	./bin/lisp-agent
@@ -7,7 +7,13 @@ run-traced:
 	LISP_AGENT_OTEL_ENDPOINT=http://127.0.0.1:6006 ./bin/lisp-agent
 
 phoenix:
-	uvx --from arize-phoenix phoenix serve
+	docker compose up -d phoenix
+
+phoenix-down:
+	docker compose down
+
+phoenix-logs:
+	docker compose logs -f phoenix
 
 test:
 	GUILE_AUTO_COMPILE=0 guile -L src test/default-agent.scm

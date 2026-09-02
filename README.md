@@ -105,14 +105,16 @@ IDs, model name, bounded inputs/outputs/thinking, duration, status, and Ollama
 token counts. This is separate from the append-only audit journal at
 `.lisp-agent/events.scm-log`.
 
-Enter `/traces` for a quick local summary. For a full trace UI, run Phoenix in a
-second terminal (requires `uv`):
+Enter `/traces` for a quick local summary. For a full trace UI, start the
+official Phoenix container (requires Docker):
 
 ```sh
 make phoenix
 ```
 
-Then launch the harness with OTLP export enabled:
+This starts Phoenix in the background on `http://localhost:6006` and stores its
+database in a persistent Docker volume. Then launch the harness with OTLP export
+enabled:
 
 ```sh
 make run-traced
@@ -123,6 +125,13 @@ small Python bridge is dependency-isolated by `uv` and sends OTLP/HTTP protobuf
 to Phoenix; tracing is still fully functional as local JSONL when it is absent.
 Set `LISP_AGENT_OTEL_ENDPOINT` or `PHOENIX_COLLECTOR_ENDPOINT` to export to a
 different collector.
+
+To inspect Phoenix logs or stop the container without deleting its trace volume:
+
+```sh
+make phoenix-logs
+make phoenix-down
+```
 
 ## Current boundary
 
