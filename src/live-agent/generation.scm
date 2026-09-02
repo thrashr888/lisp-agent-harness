@@ -19,9 +19,12 @@
 
 (define required-bindings
   '(agent-name
+    agent-provider
     agent-model
     agent-base-url
     agent-api-key-environment
+    agent-stream?
+    agent-thinking
     agent-max-tool-rounds
     agent-system-prompt
     agent-tools
@@ -106,11 +109,16 @@
   (let ((policy (module-ref module 'agent-shell-policy)))
     (unless (memq policy '(deny ask))
       (error "agent-shell-policy must be deny or ask" policy)))
-  (let ((model (module-ref module 'agent-model))
+  (let ((provider (module-ref module 'agent-provider))
+        (model (module-ref module 'agent-model))
         (base-url (module-ref module 'agent-base-url))
         (key-environment
          (module-ref module 'agent-api-key-environment))
+        (stream? (module-ref module 'agent-stream?))
+        (thinking (module-ref module 'agent-thinking))
         (tools (module-ref module 'agent-tools)))
+    (unless (memq provider '(ollama openai))
+      (error "agent-provider must be ollama or openai" provider))
     (unless (and (string? model) (not (string-null? model)))
       (error "agent-model must be a non-empty string" model))
     (unless (and (string? base-url) (not (string-null? base-url)))
@@ -118,9 +126,14 @@
     (unless (or (not key-environment) (string? key-environment))
       (error "agent-api-key-environment must be a string or #f"
              key-environment))
+    (unless (boolean? stream?)
+      (error "agent-stream? must be a boolean" stream?))
+    (unless (or (not thinking)
+                (memq thinking '(low medium high)))
+      (error "agent-thinking must be #f, low, medium, or high" thinking))
     (unless (and (list? tools)
-                 (every (lambda (tool) (memq tool '(read shell))) tools))
-      (error "agent-tools may contain only read and shell" tools)))
+                 (every (lambda (tool) (memq tool '(read shell live_eval))) tools))
+      (error "agent-tools may contain only read, shell, and live_eval" tools)))
   (let ((rounds (module-ref module 'agent-max-tool-rounds)))
     (unless (and (integer? rounds) (>= rounds 0) (<= rounds 8))
       (error "agent-max-tool-rounds must be an integer from 0 through 8" rounds)))

@@ -6,9 +6,12 @@
 (define fixture-source
   (string-append
    "(define agent-name \"fixture\")\n"
+   "(define agent-provider 'ollama)\n"
    "(define agent-model \"demo\")\n"
-   "(define agent-base-url \"http://127.0.0.1:9999/v1\")\n"
+   "(define agent-base-url \"http://127.0.0.1:9999\")\n"
    "(define agent-api-key-environment \"OPENAI_API_KEY\")\n"
+   "(define agent-stream? #t)\n"
+   "(define agent-thinking 'low)\n"
    "(define agent-max-tool-rounds 2)\n"
    "(define agent-system-prompt \"fixture prompt\")\n"
    "(define agent-tools '(read))\n"
