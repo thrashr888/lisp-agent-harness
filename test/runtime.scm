@@ -95,6 +95,24 @@
   4
   (generation-id (runtime-current runtime)))
 
+(test-error "live patches cannot replace language primitives"
+  #t
+  (runtime-eval! runtime "(define string-append (lambda values \"oops\"))"))
+
+(test-error "live patches cannot run arbitrary top-level expressions"
+  #t
+  (runtime-eval! runtime "(+ 1 2)"))
+
+(runtime-eval!
+ runtime
+ "(begin (define extension-label \"safe\") (set! agent-system-prompt \"updated\"))")
+
+(test-equal "begin may group namespaced live changes"
+  "safe"
+  (generation-ref (runtime-current runtime) 'extension-label))
+
+(runtime-rollback! runtime)
+
 (runtime-rollback! runtime)
 
 (test-equal "rollback restores the prior module"

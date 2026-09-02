@@ -5,6 +5,7 @@
   #:use-module (ice-9 textual-ports)
   #:use-module (srfi srfi-1)
   #:use-module (live-agent json)
+  #:use-module (live-agent extensions)
   #:use-module (live-agent generation)
   #:use-module (live-agent provider)
   #:use-module (live-agent runtime)
@@ -41,6 +42,11 @@
     "  /reload-clean     reload the file without live patches\n"
     "  /rollback         restore the previous working generation\n"
     "  /generations      list the active and rollback generations\n"
+    "  /extensions       list persistent extension artifacts and status\n"
+    "  /extension-create NAME EXPR  create a disabled artifact\n"
+    "  /extension-load NAME         enable an artifact as a generation\n"
+    "  /extension-disable NAME      remove its exact active patch\n"
+    "  /extension-export NAME       save all active patches as an artifact\n"
     "  /traces           show recent spans with generation and context choices\n"
     "  /reset            clear conversation state\n"
     "  /help             show this help\n"
@@ -151,11 +157,72 @@
     thunk
     #:unwind? #t))
 
+(define (extensions-directory)
+  (string-append (getcwd) "/extensions"))
+
+(define (extension-active? runtime name)
+  (catch #t
+    (lambda ()
+      (if (member (extension-read (extensions-directory) name)
+                  (generation-patches (runtime-current runtime)))
+          #t
+          #f))
+    (lambda _ #f)))
+
+(define (show-extensions runtime)
+  (let ((names (extension-list (extensions-directory))))
+    (if (null? names)
+        (display "No extensions. Create one with /extension-create NAME EXPR.\n")
+        (for-each
+         (lambda (name)
+           (format #t "~a  ~a~%"
+                   (if (extension-active? runtime name) "enabled " "disabled")
+                   name))
+         names))))
+
+(define (trimmed-command-argument line prefix)
+  (string-trim-both (substring line (string-length prefix))))
+
+(define (split-name-and-expression value)
+  (let ((space (string-index value #\space)))
+    (unless space
+      (error "expected an extension name followed by a Scheme expression"))
+    (let ((name (substring value 0 space))
+          (expression (string-trim-both (substring value (+ space 1)))))
+      (when (string-null? expression)
+        (error "extension expression cannot be empty"))
+      (list name expression))))
+
+(define (create-extension! runtime name expression description)
+  ;; Validate against the complete active image before persisting the artifact.
+  (runtime-validate-patch! runtime expression)
+  (extension-create! (extensions-directory) name expression description))
+
+(define (load-extension! runtime name)
+  (let ((expression (extension-read (extensions-directory) name)))
+    (if (member expression (generation-patches (runtime-current runtime)))
+        (runtime-current runtime)
+        (runtime-apply-patch!
+         runtime expression 'extension-load `((extension . ,name))))))
+
+(define (disable-extension! runtime name)
+  (let ((expression (extension-read (extensions-directory) name)))
+    (runtime-remove-patch!
+     runtime expression 'extension-disable `((extension . ,name)))))
+
+(define (export-extension! runtime name description)
+  (extension-export!
+   (extensions-directory)
+   name
+   (generation-patches (runtime-current runtime))
+   description))
+
 (define (handle-command runtime tracer line)
   (cond
    ((string=? line "/help") (show-help) 'continue)
    ((string=? line "/show") (show-generation runtime) 'continue)
    ((string=? line "/generations") (show-generations runtime) 'continue)
+   ((string=? line "/extensions") (show-extensions runtime) 'continue)
    ((string=? line "/traces") (show-traces tracer) 'continue)
    ((string=? line "/reload")
     (when (try-transition "reload" (lambda () (runtime-reload! runtime #t)))
@@ -177,6 +244,53 @@
                             (lambda () (runtime-eval! runtime expression)))
         (show-generation runtime)))
     'continue)
+   ((string-prefix? "/extension-create " line)
+    (when
+        (try-transition
+         "extension creation"
+         (lambda ()
+           (let* ((parts
+                   (split-name-and-expression
+                    (trimmed-command-argument line "/extension-create ")))
+                  (path
+                   (create-extension!
+                    runtime (car parts) (cadr parts)
+                    "Created explicitly from the interactive session.")))
+             (format #t "Created disabled extension ~a.\n" path)
+             #t)))
+      (show-extensions runtime))
+    'continue)
+   ((or (string-prefix? "/extension-load " line)
+        (string-prefix? "/extension-enable " line))
+    (let* ((prefix (if (string-prefix? "/extension-load " line)
+                       "/extension-load "
+                       "/extension-enable "))
+           (name (trimmed-command-argument line prefix)))
+      (when (try-transition "extension load"
+                            (lambda () (load-extension! runtime name)))
+        (show-generation runtime)))
+    'continue)
+   ((string-prefix? "/extension-disable " line)
+    (let ((name
+           (trimmed-command-argument line "/extension-disable ")))
+      (when (try-transition "extension disable"
+                            (lambda () (disable-extension! runtime name)))
+        (show-generation runtime)))
+    'continue)
+   ((string-prefix? "/extension-export " line)
+    (let ((name
+           (trimmed-command-argument line "/extension-export ")))
+      (when
+          (try-transition
+           "extension export"
+           (lambda ()
+             (let ((path
+                    (export-extension!
+                     runtime name "Exported explicitly from the active generation.")))
+               (format #t "Exported active patches to ~a.\n" path)
+               #t)))
+        (show-extensions runtime)))
+    'continue)
    ((string=? line "/reset") 'reset)
    ((or (string=? line "/quit") (string=? line "/exit")) 'quit)
    (else
@@ -185,6 +299,15 @@
 
 (define (tool-name value)
   (if (symbol? value) (symbol->string value) value))
+
+(define live-change-intent-words
+  '("fix" "change" "update" "modify" "edit" "remember" "configure"
+    "switch" "enable" "disable" "always" "start" "stop"))
+
+(define (explicit-live-change-request? text)
+  (let ((lower (string-downcase text)))
+    (any (lambda (word) (string-contains lower word))
+         live-change-intent-words)))
 
 (define (read-user-line prompt)
   (if (isatty? (current-input-port))
@@ -223,23 +346,115 @@
                    (make-message "assistant" reply)))
      reply)))
 
-(define (execute-live-eval runtime generation arguments)
-  (let ((expression (json-object-ref arguments "expression"))
-        (reason (json-object-ref arguments "reason" "requested live change")))
-    (catch #t
-      (lambda ()
-        (let ((activated (runtime-eval! runtime expression)))
+(define (non-empty-tool-text arguments key)
+  (let ((value (json-object-ref arguments key #f)))
+    (unless (and (string? value) (not (string-null? (string-trim-both value))))
+      (error "tool argument must be a non-empty string" key))
+    value))
+
+(define (last-item items)
+  (if (null? (cdr items)) (car items) (last-item (cdr items))))
+
+(define (assistant-explained-change? messages)
+  (and (pair? messages)
+       (let* ((message (last-item messages))
+              (content (json-object-ref message "content" #f)))
+         (and (string? content)
+              (>= (string-length (string-trim-both content)) 12)))))
+
+(define (execute-live-eval runtime generation arguments explained?)
+  (catch #t
+    (lambda ()
+      (unless explained?
+        (error
+         "explain the exact live change and expected effect to the user before calling live_eval"))
+      (let ((expression (non-empty-tool-text arguments "expression"))
+            (summary (non-empty-tool-text arguments "summary"))
+            (expected (non-empty-tool-text arguments "expected_behavior")))
+        (let ((activated
+               (runtime-apply-patch!
+                runtime expression 'eval
+                `((summary . ,summary) (expected-behavior . ,expected)))))
           (make-tool-result
            #t
            (format #f
-                   "Activated generation ~a (~a) for the next user turn. Current turn remains pinned to generation ~a; /rollback undoes it."
+                   "Live change applied: ~a\nBefore: generation ~a, fingerprint ~a\nAfter: generation ~a, fingerprint ~a\nExpected on the next user turn: ~a\nRequired follow-up: explain this before/after result to the user now. The current turn remains pinned to generation ~a; /rollback undoes it."
+                   summary
+                   (generation-id generation)
+                   (generation-fingerprint generation)
                    (generation-id activated)
-                   reason
-                   (generation-id generation)))))
-      (lambda (key . arguments)
-        (make-tool-result
-         #f
-         (format #f "live evaluation rejected (~a): ~s" key arguments))))))
+                   (generation-fingerprint activated)
+                   expected
+                   (generation-id generation))))))
+    (lambda (key . arguments)
+      (make-tool-result
+       #f
+       (format #f "live evaluation rejected (~a): ~s" key arguments)))))
+
+(define (execute-extension runtime generation arguments)
+  (catch #t
+    (lambda ()
+      (let ((action (non-empty-tool-text arguments "action")))
+        (cond
+         ((string=? action "list")
+          (let ((names (extension-list (extensions-directory))))
+            (make-tool-result
+             #t
+             (if (null? names)
+                 "No extensions."
+                 (string-join
+                  (map (lambda (name)
+                         (string-append
+                          (if (extension-active? runtime name)
+                              "enabled  " "disabled ")
+                          name))
+                       names)
+                  "\n")))))
+         ((string=? action "create")
+          (let* ((name (non-empty-tool-text arguments "name"))
+                 (expression (non-empty-tool-text arguments "expression"))
+                 (description
+                  (json-object-ref arguments "description"
+                                   "Created by the agent from a live session."))
+                 (path (create-extension! runtime name expression description)))
+            (make-tool-result
+             #t (format #f "Created disabled extension ~a." path))))
+         ((string=? action "load")
+          (let* ((name (non-empty-tool-text arguments "name"))
+                 (before (runtime-current runtime))
+                 (activated (load-extension! runtime name)))
+            (make-tool-result
+             #t
+             (if (= (generation-id before) (generation-id activated))
+                 (format #f "Extension ~a is already enabled in generation ~a."
+                         name (generation-id before))
+                 (format #f
+                         "Enabled extension ~a: generation ~a (~a) -> generation ~a (~a). It applies on the next user turn."
+                         name
+                         (generation-id before) (generation-fingerprint before)
+                         (generation-id activated)
+                         (generation-fingerprint activated))))))
+         ((string=? action "disable")
+          (let* ((name (non-empty-tool-text arguments "name"))
+                 (activated (disable-extension! runtime name)))
+            (make-tool-result
+             #t
+             (format #f "Disabled extension ~a in generation ~a (~a)."
+                     name (generation-id activated)
+                     (generation-fingerprint activated)))))
+         ((string=? action "export")
+          (let* ((name (non-empty-tool-text arguments "name"))
+                 (description
+                  (json-object-ref arguments "description"
+                                   "Exported by the agent from the active generation."))
+                 (path (export-extension! runtime name description)))
+            (make-tool-result
+             #t (format #f "Exported active live patches to ~a." path))))
+         (else (error "unknown extension action" action)))))
+    (lambda (key . arguments)
+      (make-tool-result
+       #f
+       (format #f "extension action rejected (~a): ~s" key arguments)))))
 
 (define (valid-context-paths? paths)
   (and (list? paths)
@@ -310,9 +525,8 @@
     (if (null? remaining)
         result
         (let* ((call (car remaining))
-               (name (tool-call-name call)))
-          (unless (member name enabled-tools)
-            (error "model requested a tool outside the live image" name))
+               (name (tool-call-name call))
+               (enabled? (if (member name enabled-tools) #t #f)))
           (runtime-record!
            runtime 'tool-call
            `((generation . ,(generation-id generation))
@@ -326,15 +540,27 @@
                      (input.value . ,(json-write (tool-call-arguments call))))
                    parent))
                  (outcome
-                  (if (string=? name "live_eval")
-                      (execute-live-eval
-                       runtime generation (tool-call-arguments call))
-                      (execute-tool
-                       name
-                       (tool-call-arguments call)
-                       (getcwd)
-                       (generation-ref generation 'agent-shell-policy)
-                       confirm-shell)))
+                  (if (not enabled?)
+                      (make-tool-result
+                       #f
+                       (format #f
+                               "tool unavailable in this turn: ~a. It was not enabled by the active image or the user's explicit intent. Continue without it."
+                               name))
+                      (cond
+                       ((string=? name "live_eval")
+                        (execute-live-eval
+                         runtime generation (tool-call-arguments call)
+                         (assistant-explained-change? messages)))
+                       ((string=? name "extension")
+                        (execute-extension
+                         runtime generation (tool-call-arguments call)))
+                       (else
+                        (execute-tool
+                         name
+                         (tool-call-arguments call)
+                         (getcwd)
+                         (generation-ref generation 'agent-shell-policy)
+                         confirm-shell)))))
                  (ok? (tool-result-success? outcome))
                  (output (tool-result-output outcome)))
             (trace-end! span (if ok? "OK" "ERROR")
@@ -430,8 +656,17 @@
          (key-environment
           (generation-ref generation 'agent-api-key-environment))
          (api-key (and key-environment (getenv key-environment)))
-         (enabled-tools
+         (configured-tools
           (map tool-name (generation-ref generation 'agent-tools)))
+         ;; Self-mutation is absent from the provider request unless this user
+         ;; turn contains explicit change intent. This prevents opportunistic
+         ;; "helpful" rewrites when the user only asked a factual question.
+         (enabled-tools
+          (filter
+           (lambda (name)
+             (or (not (string=? name "live_eval"))
+                 (explicit-live-change-request? line)))
+           configured-tools))
          (max-rounds
           (generation-ref generation 'agent-max-tool-rounds))
          (stream? (generation-ref generation 'agent-stream?))

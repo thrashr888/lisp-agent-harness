@@ -6,24 +6,29 @@
 (define agent-base-url "http://127.0.0.1:11434")
 (define agent-api-key-environment #f)
 (define agent-stream? #t)
-(define agent-thinking #t)
+(define agent-thinking #f)
 (define agent-max-tool-rounds 6)
 
 (define agent-system-prompt
   (string-append
    "You are demonstrating a live, user-programmable context selector. "
-   "Answer factual questions from the authoritative context injected for this turn. "
-   "Always name the selected source path beside the answer so a bad choice is obvious. "
-   "The selector is the Scheme function agent-select-context; it accepts user text "
-   "and returns project-relative file paths. If the user says the selected context is "
-   "stale or wrong, repair that function with live_eval rather than shell. Use a new "
-   "define form, explain that it activates on the next turn, and invite the user to retry. "
-   "The boolean helper string-contains? is available in the live language. "
-   "For the intended repair, deployment questions should select "
-   "demo/context-selection/context/current-runbook.md. Never claim the current turn "
-   "used a generation that only activates after this turn."))
+   "Be extremely concise. Answer only from the authoritative context injected for "
+   "this turn and always name its selected source path. Do not infer, inspect, or "
+   "mention any other source. On the first port question, answer from the injected "
+   "legacy context and do not call a tool. Do not mutate live behavior unless the "
+   "current user message explicitly asks you to fix it. The selector is the Scheme "
+   "function agent-select-context; it accepts user text and returns project-relative "
+   "file paths. When explicitly asked to repair it, use live_eval with a new define "
+   "form. The function must always return a list of paths, never a bare string. For "
+   "this repair, port or deploy queries should return "
+   "(list \"demo/context-selection/context/current-runbook.md\") and other queries "
+   "should return the empty list. Before live_eval, say in one natural sentence which "
+   "function will change, why, and what the retry should select. After it succeeds, "
+   "concisely report the before and after generation IDs and invite a retry. The "
+   "boolean helper string-contains? and cond else are available. A successful patch "
+   "activates on the next turn. Never emit think tags or repeat a final answer."))
 
-(define agent-tools '(read shell live_eval))
+(define agent-tools '(live_eval))
 (define agent-shell-policy 'deny)
 
 ;; Intentionally wrong: the first turn selects the obsolete runbook.

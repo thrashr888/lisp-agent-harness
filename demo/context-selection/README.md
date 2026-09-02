@@ -1,9 +1,13 @@
 # Live context-selection demo
 
 This demo begins with an intentionally bad Scheme context selector. It chooses
-the 2024 Atlas runbook and answers `8080`. The user points out the stale source,
-the agent rewrites `agent-select-context` through `live_eval`, and the retry uses
+the 2024 Atlas runbook and answers `8080`. The user naturally challenges the
+source, the agent explains and rewrites `agent-select-context` through
+`live_eval`, reports the exact generation transition, and the retry uses
 generation 2 plus the 2026 runbook to answer `9443`.
+
+This demo image disables visible model thinking so the interaction stays short;
+the default agent still streams thinking and content independently.
 
 Start Dockerized Phoenix and enter the demo:
 

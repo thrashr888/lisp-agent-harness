@@ -51,6 +51,23 @@
        (cons "tool_call_id" call-id)
        (cons "content" content))))
 
+(define (function-tool name description properties required)
+  (json-object
+   (cons "type" "function")
+   (cons "function"
+         (json-object
+          (cons "name" name)
+          (cons "description" description)
+          (cons "parameters"
+                (json-object
+                 (cons "type" "object")
+                 (cons "properties" properties)
+                 (cons "required" (apply json-array required))
+                 (cons "additionalProperties" #f)))))))
+
+(define (string-parameter description)
+  (json-object (cons "type" "string") (cons "description" description)))
+
 (define (tool-schema name)
   (cond
    ((string=? name "read")
@@ -74,6 +91,36 @@
                                  (cons "description" "Project-relative file path")))))
                    (cons "required" (json-array "path"))
                    (cons "additionalProperties" #f)))))))
+   ((string=? name "rg")
+    (function-tool
+     "rg"
+     "Search project text with ripgrep without invoking a shell. Results are bounded and project-confined."
+     (json-object
+      (cons "query" (string-parameter "Literal or regular-expression search query"))
+      (cons "path" (string-parameter "Optional project-relative file or directory; defaults to ."))
+      (cons "glob" (string-parameter "Optional ripgrep glob such as *.scm")))
+     '("query")))
+   ((string=? name "write")
+    (function-tool
+     "write"
+     "Atomically create or replace one UTF-8 text file inside the project. Parent directories must already exist."
+     (json-object
+      (cons "path" (string-parameter "Project-relative file path"))
+      (cons "content" (string-parameter "Complete new file content")))
+     '("path" "content")))
+   ((string=? name "edit")
+    (function-tool
+     "edit"
+     "Atomically edit one project text file by exact replacement. By default old_text must occur exactly once."
+     (json-object
+      (cons "path" (string-parameter "Project-relative file path"))
+      (cons "old_text" (string-parameter "Exact text to replace"))
+      (cons "new_text" (string-parameter "Replacement text"))
+      (cons "replace_all"
+            (json-object
+             (cons "type" "boolean")
+             (cons "description" "Replace every occurrence; defaults to false"))))
+     '("path" "old_text" "new_text")))
    ((string=? name "shell")
     (json-object
      (cons "type" "function")
@@ -97,37 +144,42 @@
                    (cons "required" (json-array "command"))
                    (cons "additionalProperties" #f)))))))
    ((string=? name "live_eval")
-    (json-object
-     (cons "type" "function")
-     (cons "function"
-           (json-object
-            (cons "name" "live_eval")
-            (cons "description"
-                  (string-append
-                   "Transactionally evaluate Scheme in your live image. Use this "
-                   "when the user asks you to change your prompt, model, tools, or "
-                   "behavior. Public bindings include agent-system-prompt, agent-model, "
-                   "agent-tools, agent-stream?, and agent-thinking. For example: "
-                   "(set! agent-system-prompt (string-append agent-system-prompt "
-                   "\" The user's name is Paul.\")). Do not guess starred variables. "
-                   "The next user turn sees the change; /rollback undoes it."))
-            (cons "parameters"
-                  (json-object
-                   (cons "type" "object")
-                   (cons "properties"
-                         (json-object
-                          (cons "expression"
-                                (json-object
-                                 (cons "type" "string")
-                                 (cons "description"
-                                       "One or more Scheme definitions to activate")))
-                          (cons "reason"
-                                (json-object
-                                 (cons "type" "string")
-                                 (cons "description"
-                                       "Short user-facing reason for the change")))))
-                   (cons "required" (json-array "expression"))
-                   (cons "additionalProperties" #f)))))))
+    (function-tool
+     "live_eval"
+     (string-append
+      "Transactionally change your live Scheme behavior. Before calling, explain "
+      "to the user what binding will change, why, and the expected effect. Top-level "
+      "forms are limited to define, define*, set!, or begin and may target only "
+      "agent-* or extension-* bindings. The next user turn sees the generation; "
+      "/rollback undoes it. After the result, explain the before/after generations "
+      "and whether the expected behavior was achieved or still needs a retry.")
+     (json-object
+      (cons "expression"
+            (string-parameter "One or more restricted Scheme definitions or assignments"))
+      (cons "summary"
+            (string-parameter "Plain-language description of exactly what changes"))
+      (cons "expected_behavior"
+            (string-parameter "Observable behavior expected on the next user turn")))
+     '("expression" "summary" "expected_behavior")))
+   ((string=? name "extension")
+    (function-tool
+     "extension"
+     (string-append
+      "Manage persistent Scheme extension artifacts. Actions: list; create a named "
+      "artifact from expression without enabling it; load it into a new generation; "
+      "disable its exact patch; or export all active live patches under a name. "
+      "Explain user-visible changes before create, load, disable, or export.")
+     (json-object
+      (cons "action"
+            (json-object
+             (cons "type" "string")
+             (cons "enum" (json-array "list" "create" "load" "disable" "export"))))
+      (cons "name" (string-parameter "Artifact name for actions other than list"))
+      (cons "expression"
+            (string-parameter "Restricted Scheme patch required by create"))
+      (cons "description"
+            (string-parameter "Short purpose recorded in the artifact header")))
+     '("action")))
    (else (error "unknown live tool" name))))
 
 (define (without-trailing-slash value)

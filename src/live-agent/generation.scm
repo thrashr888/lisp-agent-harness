@@ -15,7 +15,10 @@
             build-generation
             generation-ref
             generation-call
+            validate-live-patch!
             read-source-file))
+
+(define max-live-patch-chars (* 16 1024))
 
 (define required-bindings
   '(agent-name
@@ -108,6 +111,61 @@
             (eval form module)
             (loop)))))))
 
+(define (live-binding? value)
+  (and (symbol? value)
+       (let ((name (symbol->string value)))
+         (or (string-prefix? "agent-" name)
+             (string-prefix? "extension-" name)))))
+
+(define (definition-target form)
+  (and (pair? (cdr form))
+       (let ((head (cadr form)))
+         (cond
+          ((symbol? head) head)
+          ((and (pair? head) (symbol? (car head))) (car head))
+          (else #f)))))
+
+(define (validate-live-form! form)
+  (unless (pair? form)
+    (error "live patch must contain definitions, assignments, or begin" form))
+  (case (car form)
+    ((define define*)
+     (let ((target (definition-target form)))
+       (unless (live-binding? target)
+         (error "live patch definitions must target agent-* or extension-* bindings"
+                target))))
+    ((set!)
+     (unless (and (pair? (cdr form)) (live-binding? (cadr form)))
+       (error "live patch assignments must target agent-* or extension-* bindings"
+              form)))
+    ((begin)
+     (when (null? (cdr form))
+       (error "live patch begin must contain at least one form"))
+     (for-each validate-live-form! (cdr form)))
+    (else
+     (error "live patch top-level form must be define, define*, set!, or begin"
+            (car form)))))
+
+(define (validate-live-patch! text)
+  (unless (string? text)
+    (error "live patch must be a string" text))
+  (when (string-null? (string-trim-both text))
+    (error "live patch cannot be empty"))
+  (when (> (string-length text) max-live-patch-chars)
+    (error "live patch exceeds the 16 KiB limit" (string-length text)))
+  (call-with-input-string
+      text
+    (lambda (port)
+      (let loop ((count 0))
+        (let ((form (read port)))
+          (if (eof-object? form)
+              (begin
+                (when (= count 0) (error "live patch contains no forms"))
+                #t)
+              (begin
+                (validate-live-form! form)
+                (loop (+ count 1)))))))))
+
 (define (validate-module! module)
   (for-each
    (lambda (name)
@@ -140,8 +198,10 @@
                 (memq thinking '(low medium high)))
       (error "agent-thinking must be #t, #f, low, medium, or high" thinking))
     (unless (and (list? tools)
-                 (every (lambda (tool) (memq tool '(read shell live_eval))) tools))
-      (error "agent-tools may contain only read, shell, and live_eval" tools)))
+                 (every (lambda (tool)
+                          (memq tool '(read rg write edit shell live_eval extension)))
+                        tools))
+      (error "agent-tools contains an unsupported tool" tools)))
   (let ((rounds (module-ref module 'agent-max-tool-rounds)))
     (unless (and (integer? rounds) (>= rounds 0) (<= rounds 8))
       (error "agent-max-tool-rounds must be an integer from 0 through 8" rounds)))

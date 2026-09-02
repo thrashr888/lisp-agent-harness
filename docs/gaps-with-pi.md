@@ -12,15 +12,15 @@ observability. The useful comparison is therefore asymmetric.
 
 | Gap | Why it matters |
 | --- | --- |
-| Coding tools | There is no first-class edit, write, grep, find, patch, or structured process tool. `read` and approval-gated `shell` are a spike, not a coding workflow. |
+| Coding workflow depth | `read`, `rg`, atomic `write`, and exact `edit` now cover the basic loop, but there is no structured process tool, patch hunks, diagnostics integration, cancellation, or rich diff review. |
 | Durable sessions | Conversation history cannot yet be resumed, branched, forked, compacted, exported, or shared. The audit journal and traces are diagnostic records, not resumable session state. |
 | Provider breadth | Native Ollama plus a basic non-streaming OpenAI-compatible path is far behind Pi’s provider catalog, authentication, model switching, retries, and multimodal handling. |
 | Terminal product | There is no rich TUI, multiline editor, tool-call renderer, queueing, keybindings, themes, settings UI, or model picker. |
-| Extension ecosystem | No skills, prompt templates, package manager, lifecycle/event API, custom UI, or distributable extension format exists. |
+| Extension ecosystem | Named Scheme artifacts can now be created, listed, loaded, disabled, and exported, but there are no skills, prompt templates, dependencies, package registry, lifecycle/event API, custom UI, signatures, or compatibility metadata. |
 | Embedding modes | There is no print/JSON mode, RPC protocol, SDK, web UI, or supported library boundary. |
 | Long-session behavior | There is no token accounting policy, context compaction, retry/backoff strategy, cancellation, or recovery after interrupted tool calls. |
 | Production hardening | The Scheme evaluator’s authority surface needs a deeper audit, fuzzing, resource limits, symlink/race analysis, secret redaction, trace retention controls, and cross-platform testing. |
-| Mutation lifecycle | Live patches are session-local. There is no reviewed diff, named patch, selective rollback, promotion into source, migration, signature, or replay guarantee. |
+| Mutation lifecycle | Live state can now be exported as a named artifact and an exact loaded artifact can be disabled, but there is no reviewed diff, patch composition UI, promotion into base source, migration, signature, or replay guarantee. |
 | Performance evidence | There are no benchmarks showing that live Scheme changes are faster or more reliable than editing and reloading an extension. |
 
 Pi already covers most of that surface: four run modes, broad providers,
@@ -52,8 +52,8 @@ and [`telemetry contract`](https://github.com/earendil-works/pi/blob/main/packag
 
 - A deterministic eval proving that a live context-selection change improves a
   realistic task set instead of one hand-built example.
-- A safe promotion path from a successful ephemeral mutation to reviewed,
-  persistent source code.
+- A safe promotion path from an exported Scheme artifact to reviewed base source
+  code; persistence now exists, but review and promotion do not.
 - Clear trace privacy defaults for prompts, model reasoning, file contents, and
   tool output.
 - A replay model that says what happens when provider output, repository state,

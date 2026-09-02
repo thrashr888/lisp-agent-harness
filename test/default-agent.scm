@@ -33,6 +33,10 @@
 (test-assert "agent can change its constrained live image"
   (memq 'live_eval (generation-ref generation 'agent-tools)))
 
+(test-equal "enables the complete constrained coding tool set"
+  '(read rg write edit shell live_eval extension)
+  (generation-ref generation 'agent-tools))
+
 (test-equal "default context selection is empty"
   '()
   (generation-call generation 'agent-select-context "hello"))

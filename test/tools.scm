@@ -47,4 +47,66 @@
                         "denied by the live image")))
 (test-assert "deny policy never prompts" (not confirm-called?))
 
+(define tool-root
+  (string-append "/tmp/lisp-agent-tools-test-" (number->string (getpid))))
+(system* "mkdir" "-p" tool-root)
+
+(define write-result
+  (execute-tool
+   "write"
+   (json-object (cons "path" "notes.txt")
+                (cons "content" "alpha port 8080\nalpha port 8080\n"))
+   tool-root 'deny (lambda _ #f)))
+
+(test-assert "write atomically creates a project file"
+  (and (tool-result-success? write-result)
+       (file-exists? (string-append tool-root "/notes.txt"))))
+
+(define ambiguous-edit
+  (execute-tool
+   "edit"
+   (json-object (cons "path" "notes.txt")
+                (cons "old_text" "8080")
+                (cons "new_text" "9443"))
+   tool-root 'deny (lambda _ #f)))
+
+(test-assert "edit rejects ambiguous replacements by default"
+  (and (not (tool-result-success? ambiguous-edit))
+       (string-contains (tool-result-output ambiguous-edit) "ambiguous")))
+
+(define all-edit
+  (execute-tool
+   "edit"
+   (json-object (cons "path" "notes.txt")
+                (cons "old_text" "8080")
+                (cons "new_text" "9443")
+                (cons "replace_all" #t))
+   tool-root 'deny (lambda _ #f)))
+
+(test-assert "edit can replace every exact occurrence explicitly"
+  (and (tool-result-success? all-edit)
+       (string-contains (tool-result-output all-edit) "2 occurrences")))
+
+(define rg-result
+  (execute-tool
+   "rg"
+   (json-object (cons "query" "9443") (cons "path" "."))
+   tool-root 'deny (lambda _ #f)))
+
+(test-assert "rg searches without shell authority"
+  (and (tool-result-success? rg-result)
+       (string-contains (tool-result-output rg-result) "notes.txt:1")
+       (string-contains (tool-result-output rg-result) "notes.txt:2")))
+
+(define escaped-write
+  (execute-tool
+   "write"
+   (json-object (cons "path" "../escape.txt") (cons "content" "no"))
+   tool-root 'deny (lambda _ #f)))
+
+(test-assert "write rejects paths outside the project"
+  (and (not (tool-result-success? escaped-write))
+       (string-contains (tool-result-output escaped-write)
+                        "escapes the project root")))
+
 (test-end "tools")

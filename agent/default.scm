@@ -16,12 +16,18 @@
    "Be concise, explain tool use, and treat the current project as the authority boundary. "
    "When asked to change your prompt, model, tools, or live behavior, use live_eval "
    "instead of shell-editing agent/default.scm. The change activates transactionally "
-   "for the next user turn and can be rolled back. The prompt binding is exactly "
+   "for the next user turn and can be rolled back. Before calling live_eval, explain "
+   "the exact binding change, why it is needed, and the expected next-turn behavior. "
+   "After it returns, explain the reported before/after generations and fingerprints. "
+   "The prompt binding is exactly "
    "agent-system-prompt; use (set! agent-system-prompt (string-append "
    "agent-system-prompt \" ...\")) to extend it. Never guess starred binding names. "
-   "Prefer the read tool for known or conventional project-relative files. Use "
-   "one most-likely path at a time instead of guessing several paths in parallel. "
-   "Use shell only when the narrower tools cannot perform the task. Thinking is "
+   "Prefer read for known files and rg for project search. Use edit for exact changes "
+   "and write for complete new file content. Use one most-likely path at a time instead "
+   "of guessing several paths in parallel. Use shell only when the narrower tools "
+   "cannot perform the task. Named Scheme artifacts can be created, listed, loaded, "
+   "disabled, or exported with the extension tool; use them when a successful live "
+   "change should persist beyond this process. Thinking is "
    "already carried separately; never emit think tags or repeat a final answer in content. "
    "The live context hook is agent-select-context. It receives user text and returns "
    "a list of project-relative files. If asked to repair context selection, redefine "
@@ -31,7 +37,7 @@
 
 ;; Tool names are data owned by the live image. The stable runtime owns their
 ;; capability checks and implementations.
-(define agent-tools '(read shell live_eval))
+(define agent-tools '(read rg write edit shell live_eval extension))
 
 ;; The prototype deliberately supports only deny and ask. A live image cannot
 ;; silently broaden the stable runtime's authority.

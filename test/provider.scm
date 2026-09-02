@@ -56,4 +56,16 @@
   "medium"
   (json-object-ref leveled-request "think"))
 
+(define coding-tools-request
+  (make-ollama-request
+   "fixture"
+   (list (make-message "user" "work"))
+   '("read" "rg" "write" "edit" "shell" "live_eval" "extension")
+   #t #f))
+
+(test-equal "serializes every constrained coding and mutation tool"
+  7
+  (length
+   (json-array-items (json-object-ref coding-tools-request "tools"))))
+
 (test-end "provider")

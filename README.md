@@ -10,9 +10,10 @@ better than editing and restarting a conventional extension.
 
 ## Try the live loop
 
-Requirements: Guile 3.0 and [Ollama](https://docs.ollama.com/). The checked-in
-image defaults to the locally installed, tool-capable `qwen3.8:27b-mlx` model at
-Ollama's native `http://127.0.0.1:11434/api/chat` endpoint.
+Requirements: Guile 3.0, [ripgrep](https://github.com/BurntSushi/ripgrep), and
+[Ollama](https://docs.ollama.com/). The checked-in image defaults to the locally
+installed, tool-capable `qwen3.8:27b-mlx` model at Ollama's native
+`http://127.0.0.1:11434/api/chat` endpoint.
 
 ```sh
 make test
@@ -49,9 +50,40 @@ live-agent> Update your prompt so you remember my name is Paul.
 ```
 
 It calls `live_eval` with Scheme such as `(set! agent-system-prompt ...)` and
-activates a validated generation for the next turn. It does not need to rewrite
-its source through a shell. Failed patches leave the current generation intact,
-and `/rollback` undoes a successful one.
+first explains the binding, reason, and expected effect. The tool then reports
+the before/after generation IDs and fingerprints; the agent explains that result
+before continuing. It does not need to rewrite its source through a shell.
+Failed patches leave the current generation intact, and `/rollback` undoes a
+successful one.
+
+Live patches are limited to 16 KiB and 64 active patches. Their top-level forms
+may only be `define`, `define*`, `set!`, or `begin`, and definitions or
+assignments must target `agent-*` or `extension-*` names. They still run in the
+curated Scheme module and the complete candidate image must pass validation
+before it activates. The provider only sees `live_eval` on turns where the user
+expresses explicit change intent (for example “fix,” “update,” “change,” or
+“configure”), which blocks unsolicited self-rewrites. This narrows accidental
+mutation; it is not a resource or semantic sandbox.
+
+## Persistent extension artifacts
+
+A useful live change can become a named Scheme artifact without rewriting the
+base agent image. Artifacts live in `extensions/*.scm`, are disabled when
+created or exported, and load through the same validated generation boundary:
+
+```text
+/extensions
+/extension-create terse (set! agent-system-prompt "Answer in one short paragraph.")
+/extension-load terse
+/extension-disable terse
+/extension-export repaired-session
+```
+
+`/extension-enable` is an alias for `/extension-load`. Export collects the
+active live patch stack, so it can be loaded again after restarting the
+process. The agent can perform the same lifecycle through its `extension` tool:
+“save your current live changes as an extension named `repaired-session`.”
+Artifacts never auto-load and existing names are never overwritten.
 
 ## Memorable demo: repair bad context live
 
@@ -64,11 +96,12 @@ make phoenix
 make demo-context
 ```
 
-Follow the three prompts in `demo/context-selection/session.txt`, or run them
-automatically with `make demo-context-scripted`. The first answer comes from the
-2024 runbook in generation 1; the repaired selector uses the 2026 runbook in
-generation 2. `/traces` and Phoenix show both selected paths and exactly which
-generation produced each answer. See `demo/context-selection/README.md`.
+Follow the short conversation in `demo/context-selection/session.txt`, or run
+it automatically with `make demo-context-scripted`. The first answer comes from
+the 2024 runbook in generation 1; the user naturally challenges that source,
+and the repaired selector uses the 2026 runbook in generation 2. `/traces` and
+Phoenix show both selected paths and exactly which generation produced each
+answer. See `demo/context-selection/README.md`.
 
 ![Live context selector repaired between generations](docs/assets/context-repair-demo.gif)
 
@@ -110,12 +143,14 @@ Set the environment variable before launching the process. The generic
 OpenAI-compatible adapter is currently non-streaming. To exercise live
 generations without any model, set `agent-model` to `"demo"`.
 
-The model can call `read`, `shell`, and `live_eval`. Reads are canonicalized and
-restricted to the process working directory. Shell commands require an explicit
-confirmation for every call; the live image can tighten that policy to `deny`,
-but cannot set ambient `allow`. `live_eval` can only use the curated Scheme
-surface and cannot introduce process, filesystem, network, dynamic-loading, or
-ambient evaluation authority.
+The model can call `read`, `rg`, `write`, `edit`, `shell`, `live_eval`, and
+`extension`. File operations are canonicalized and restricted to the process
+working directory. `rg` invokes ripgrep directly, `write` replaces a complete
+file atomically, and `edit` requires an exact unique match unless `replace_all`
+is explicit. Shell commands require a confirmation for every call; the live
+image can tighten that policy to `deny`, but cannot set ambient `allow`.
+`live_eval` can only use the curated Scheme surface and cannot introduce
+process, filesystem, network, dynamic-loading, or ambient evaluation authority.
 
 ## Traces and Phoenix
 
@@ -165,6 +200,9 @@ The stable runtime provides:
   tool output
 - A curated live-language interface without process, filesystem, network,
   dynamic-loading, module-resolution, or `eval` functions
+- Project-confined read, search, atomic write, and exact-edit capabilities
+- Named, non-overwriting Scheme extension artifacts that can be loaded,
+  disabled, or exported from active live patches
 - Hard authority validation (`agent-shell-policy` may be `deny` or `ask`, never
   ambient `allow`)
 
@@ -186,16 +224,19 @@ only between requests. Failed evaluations leave the active generation intact.
 agent/default.scm             live user-owned image
 src/live-agent/generation.scm isolated module generations
 src/live-agent/runtime.scm    transitions, rollback, journal
+src/live-agent/extensions.scm persistent artifact lifecycle
 src/live-agent/provider.scm   native Ollama and Chat Completions adapters
 src/live-agent/trace.scm      JSONL spans and optional OTLP bridge
 src/live-agent/tools.scm      stable capability checks
 src/live-agent/json.scm       dependency-free JSON codec
 src/live-agent/main.scm       interactive shell
-test/*.scm                    runtime, provider, JSON, and tool tests
+extensions/README.md          artifact contract
+test/*.scm                    runtime, provider, JSON, extension, and tool tests
 ```
 
 Journal and trace attribute values larger than 4 KiB are truncated. Tool output
-is bounded at 64 KiB; larger artifacts should be externalized and referenced.
+is bounded at 64 KiB, writes at 256 KiB, and edited source files at 512 KiB;
+larger artifacts should be externalized and referenced.
 
 ## Gaps versus Pi
 
