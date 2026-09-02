@@ -1,10 +1,16 @@
-.PHONY: run run-traced phoenix phoenix-check phoenix-down phoenix-logs test check
+.PHONY: run run-traced demo-context demo-context-scripted phoenix phoenix-check phoenix-down phoenix-logs test check
 
 run:
 	./bin/lisp-agent
 
 run-traced: phoenix-check
 	LISP_AGENT_OTEL_ENDPOINT=http://127.0.0.1:6006 ./bin/lisp-agent
+
+demo-context: phoenix-check
+	LISP_AGENT_OTEL_ENDPOINT=http://127.0.0.1:6006 ./bin/lisp-agent --agent demo/context-selection/agent.scm --state-dir .lisp-agent/context-demo
+
+demo-context-scripted: phoenix-check
+	LISP_AGENT_OTEL_ENDPOINT=http://127.0.0.1:6006 ./bin/lisp-agent --agent demo/context-selection/agent.scm --state-dir .lisp-agent/context-demo < demo/context-selection/session.txt
 
 phoenix:
 	docker compose up -d --wait phoenix

@@ -1,0 +1,64 @@
+# Gaps between this spike and Pi
+
+Snapshot: 2026-09-02. “Pi” means the current Pi coding agent maintained at
+[`earendil-works/pi`](https://github.com/earendil-works/pi) (the former
+`badlogic/pi-mono` URL redirects there).
+
+The two projects are not peers yet. Pi is a mature coding harness; this project
+is an experiment around a constrained live language, atomic generations, and
+observability. The useful comparison is therefore asymmetric.
+
+## What this harness still lacks
+
+| Gap | Why it matters |
+| --- | --- |
+| Coding tools | There is no first-class edit, write, grep, find, patch, or structured process tool. `read` and approval-gated `shell` are a spike, not a coding workflow. |
+| Durable sessions | Conversation history cannot yet be resumed, branched, forked, compacted, exported, or shared. The audit journal and traces are diagnostic records, not resumable session state. |
+| Provider breadth | Native Ollama plus a basic non-streaming OpenAI-compatible path is far behind Pi’s provider catalog, authentication, model switching, retries, and multimodal handling. |
+| Terminal product | There is no rich TUI, multiline editor, tool-call renderer, queueing, keybindings, themes, settings UI, or model picker. |
+| Extension ecosystem | No skills, prompt templates, package manager, lifecycle/event API, custom UI, or distributable extension format exists. |
+| Embedding modes | There is no print/JSON mode, RPC protocol, SDK, web UI, or supported library boundary. |
+| Long-session behavior | There is no token accounting policy, context compaction, retry/backoff strategy, cancellation, or recovery after interrupted tool calls. |
+| Production hardening | The Scheme evaluator’s authority surface needs a deeper audit, fuzzing, resource limits, symlink/race analysis, secret redaction, trace retention controls, and cross-platform testing. |
+| Mutation lifecycle | Live patches are session-local. There is no reviewed diff, named patch, selective rollback, promotion into source, migration, signature, or replay guarantee. |
+| Performance evidence | There are no benchmarks showing that live Scheme changes are faster or more reliable than editing and reloading an extension. |
+
+Pi already covers most of that surface: four run modes, broad providers,
+`read`/`write`/`edit`/`bash`, session trees and compaction, extensions, skills,
+prompt templates, themes, packages, and a full TUI. See Pi’s
+[`README`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md),
+[`usage`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/usage.md),
+and [`extension`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)
+documentation.
+
+## What Pi lacks relative to this experiment
+
+| Gap | Important nuance |
+| --- | --- |
+| Transactional code generations | Pi can hot-reload extensions, but a reload replaces the extension/resource runtime. It does not expose a first-class, immutable generation with a fingerprint attached to every turn and tool call. |
+| Granular live rollback | Pi’s session tree can branch conversation history, but it is not a rollback stack for an individual behavior definition. This harness can reject an invalid patch atomically or return to the prior code generation. |
+| In-session constrained language | Pi extensions are TypeScript modules with normal process authority. This harness evaluates a curated Scheme surface with no direct filesystem, process, network, module-loading, or ambient `eval` bindings. |
+| Stable capability ceiling | Pi explicitly has no built-in permission system; extensions run with the user process’s permissions. Here the live image cannot widen shell policy beyond `ask`, and file reads cross a stable project-root boundary. This is promising, not yet a security proof. |
+| Generation-attributed diagnosis | Pi has a vendor-neutral telemetry contract, but it deliberately ships without an exporter. It also has no equivalent code-generation identity to correlate a changed function with before/after answers. This harness records the selector, selected paths, generation, result, and tool/LLM tree locally and in Phoenix. |
+| Direct behavior patching by the model | Pi can ask the model to edit an extension and can arrange a follow-up reload, but the documented reload flow keeps the running handler in its old call frame. Here `live_eval` validates and activates a single function change for the next turn without rewriting a source file. |
+| Built-in subagents and plan mode | Pi deliberately omits these and expects packages to add them. This harness also lacks them; the difference is therefore not an advantage today. |
+
+Sources: Pi’s
+[`extension reload semantics`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md),
+[`permissions statement`](https://github.com/earendil-works/pi#permissions--containerization),
+and [`telemetry contract`](https://github.com/earendil-works/pi/blob/main/packages/telemetry/README.md).
+
+## Gaps both projects still leave open
+
+- A deterministic eval proving that a live context-selection change improves a
+  realistic task set instead of one hand-built example.
+- A safe promotion path from a successful ephemeral mutation to reviewed,
+  persistent source code.
+- Clear trace privacy defaults for prompts, model reasoning, file contents, and
+  tool output.
+- A replay model that says what happens when provider output, repository state,
+  or external tools have changed since the original generation ran.
+
+The next meaningful milestone is not “become Pi in Scheme.” It is to prove that
+generation-attributed live repair produces a debugging loop Pi’s file-edit plus
+reload model cannot express as clearly.

@@ -53,6 +53,23 @@ activates a validated generation for the next turn. It does not need to rewrite
 its source through a shell. Failed patches leave the current generation intact,
 and `/rollback` undoes a successful one.
 
+## Memorable demo: repair bad context live
+
+The context-selection demo starts with a deliberately stale selector, lets the
+agent repair its own `agent-select-context` Scheme function, and retries without
+restarting the process:
+
+```sh
+make phoenix
+make demo-context
+```
+
+Follow the three prompts in `demo/context-selection/session.txt`, or run them
+automatically with `make demo-context-scripted`. The first answer comes from the
+2024 runbook in generation 1; the repaired selector uses the 2026 runbook in
+generation 2. `/traces` and Phoenix show both selected paths and exactly which
+generation produced each answer. See `demo/context-selection/README.md`.
+
 ## Ollama default
 
 Start Ollama, confirm the model is installed, and run the harness:
@@ -155,7 +172,7 @@ The live image provides:
 - Provider, base URL, API-key environment-variable name, streaming, and thinking
 - Enabled tool names
 - Maximum tool-call rounds
-- User-input transformation and demo behavior
+- Context selection, user-input transformation, and demo behavior
 - Shell policy within the authority ceiling
 
 Each request stays pinned to the generation that began it. New code activates
@@ -178,11 +195,12 @@ test/*.scm                    runtime, provider, JSON, and tool tests
 Journal and trace attribute values larger than 4 KiB are truncated. Tool output
 is bounded at 64 KiB; larger artifacts should be externalized and referenced.
 
-## Next proof
+## Gaps versus Pi
 
-Run a real coding session and change prompt construction or tool selection after
-observing a failure. The project is only interesting if that intervention is
-more legible and useful than editing and restarting a conventional extension.
+This spike is testing a narrower idea than Pi. It now has one concrete advantage
+to evaluate—transactional, generation-attributed live behavior—but it lacks most
+of the product surface of a mature coding harness. See `docs/gaps-with-pi.md` for
+the direct comparison and the gaps on both sides.
 
 ## License
 

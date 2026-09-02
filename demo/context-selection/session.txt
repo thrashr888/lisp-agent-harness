@@ -1,0 +1,6 @@
+What port should Atlas use for production deployment? Answer with the port and selected source path.
+That selected the stale runbook. Fix agent-select-context so deployment questions select demo/context-selection/context/current-runbook.md. Use live_eval, not shell. Do not answer the port until I retry.
+What port should Atlas use for production deployment? Answer with the port and selected source path.
+/generations
+/traces
+/quit

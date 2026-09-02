@@ -3,6 +3,7 @@
   #:use-module (ice-9 format)
   #:use-module (ice-9 readline)
   #:use-module (ice-9 textual-ports)
+  #:use-module (srfi srfi-1)
   #:use-module (live-agent json)
   #:use-module (live-agent generation)
   #:use-module (live-agent provider)
@@ -40,7 +41,7 @@
     "  /reload-clean     reload the file without live patches\n"
     "  /rollback         restore the previous working generation\n"
     "  /generations      list the active and rollback generations\n"
-    "  /traces           show recent local spans and their JSONL path\n"
+    "  /traces           show recent spans with generation and context choices\n"
     "  /reset            clear conversation state\n"
     "  /help             show this help\n"
     "  /quit             exit\n")))
@@ -85,22 +86,56 @@
              (cdr (assq 'loaded-at summary))))
    (runtime-generation-summaries runtime)))
 
+(define (trace-preview value)
+  (if (and (string? value) (> (string-length value) 100))
+      (string-append (substring value 0 100) "…")
+      value))
+
+(define (trace-line-in-session? line session-id)
+  (catch #t
+    (lambda ()
+      (let* ((span (json-read line))
+             (attributes (json-object-ref span "attributes")))
+        (string=? (json-object-ref attributes "session.id" "") session-id)))
+    (lambda _ #f)))
+
 (define (show-traces tracer)
   (format #t "trace file ~a~%session ~a~%" (tracer-path tracer)
           (tracer-session-id tracer))
-  (let ((lines (trace-tail tracer 12)))
+  (let* ((session-id (tracer-session-id tracer))
+         (session-lines
+          (filter
+           (lambda (line) (trace-line-in-session? line session-id))
+           (trace-tail tracer 200)))
+         (lines
+          (if (> (length session-lines) 12)
+              (take-right session-lines 12)
+              session-lines)))
     (if (null? lines)
         (display "No completed spans yet.\n")
         (for-each
          (lambda (line)
            (catch #t
              (lambda ()
-               (let ((span (json-read line)))
-                 (format #t "~6,1f ms  ~a  ~a  ~a~%"
+               (let* ((span (json-read line))
+                      (attributes (json-object-ref span "attributes"))
+                      (generation
+                       (json-object-ref attributes "generation.id" "-"))
+                      (paths
+                       (json-object-ref attributes "context.paths" #f))
+                      (output
+                       (and (string=? (json-object-ref span "name") "agent.turn")
+                            (json-object-ref attributes "output.value" #f))))
+                 (format #t "~6,1f ms  gen=~a  ~a  ~a  ~a~a~a~%"
                          (json-object-ref span "duration_ms")
+                         generation
                          (json-object-ref span "kind")
                          (json-object-ref span "name")
-                         (json-object-ref span "status"))))
+                         (json-object-ref span "status")
+                         (if paths (format #f "  context=~a" paths) "")
+                         (if output
+                             (format #f "  result=~s" (trace-preview output))
+                             ""))))
              (lambda _ (display line) (newline))))
          lines))))
 
@@ -206,6 +241,69 @@
          #f
          (format #f "live evaluation rejected (~a): ~s" key arguments))))))
 
+(define (valid-context-paths? paths)
+  (and (list? paths)
+       (<= (length paths) 8)
+       (let loop ((remaining paths))
+         (or (null? remaining)
+             (and (string? (car remaining))
+                  (not (string-null? (car remaining)))
+                  (loop (cdr remaining)))))))
+
+(define (join-context sections)
+  (if (null? sections)
+      ""
+      (let loop ((remaining (cdr sections)) (result (car sections)))
+        (if (null? remaining)
+            result
+            (loop (cdr remaining)
+                  (string-append result "\n\n" (car remaining)))))))
+
+(define (select-context-with-trace tracer parent generation line)
+  (let ((span
+         (trace-start!
+          tracer "context.select" "RETRIEVER"
+          `((generation.id . ,(generation-id generation))
+            (input.value . ,line))
+          parent)))
+    (catch #t
+      (lambda ()
+        (let ((paths
+               (generation-call generation 'agent-select-context line)))
+          (unless (valid-context-paths? paths)
+            (error
+             "agent-select-context must return at most eight non-empty paths"
+             paths))
+          (let* ((sections
+                  (map
+                   (lambda (path)
+                     (let ((result
+                            (execute-tool
+                             "read"
+                             (json-object (cons "path" path))
+                             (getcwd)
+                             'deny
+                             (lambda _ #f))))
+                       (unless (tool-result-success? result)
+                         (error "selected context could not be read"
+                                path (tool-result-output result)))
+                       (format #f "## ~a\n\n~a"
+                               path (tool-result-output result))))
+                   paths))
+                 (content (join-context sections))
+                 (encoded-paths (json-write (apply json-array paths))))
+            (trace-end!
+             span "OK"
+             `((context.paths . ,encoded-paths)
+               (output.value . ,content)))
+            (list paths content))))
+      (lambda (key . arguments)
+        (trace-end!
+         span "ERROR"
+         `((error.type . ,(symbol->string key))
+           (error.message . ,(format #f "~s" arguments))))
+        (apply throw key arguments)))))
+
 (define (execute-tool-calls runtime tracer parent generation provider calls
                             messages enabled-tools)
   (let loop ((remaining calls) (result messages))
@@ -223,7 +321,8 @@
           (let* ((span
                   (trace-start!
                    tracer (string-append "tool." name) "TOOL"
-                   `((tool.name . ,name)
+                   `((generation.id . ,(generation-id generation))
+                     (tool.name . ,name)
                      (input.value . ,(json-write (tool-call-arguments call))))
                    parent))
                  (outcome
@@ -273,12 +372,13 @@
      (if prompt `((llm.token_count.prompt . ,prompt)) '())
      (if output `((llm.token_count.completion . ,output)) '()))))
 
-(define (complete-with-trace tracer parent provider model base-url api-key
-                             messages enabled-tools stream? thinking round)
+(define (complete-with-trace tracer parent generation-id provider model base-url
+                             api-key messages enabled-tools stream? thinking round)
   (let ((span
          (trace-start!
           tracer (string-append (symbol->string provider) ".chat") "LLM"
-          `((llm.model_name . ,model)
+          `((generation.id . ,generation-id)
+            (llm.model_name . ,model)
             (llm.provider . ,(symbol->string provider))
             (llm.round . ,round)
             (input.value . ,(json-write (apply json-array messages))))
@@ -341,15 +441,34 @@
            "system" (generation-ref generation 'agent-system-prompt)))
          (transformed-line
           (generation-call generation 'agent-transform-user line))
-         (working
+         (selected
+          (select-context-with-trace
+           tracer parent generation transformed-line))
+         (context-paths (car selected))
+         (context-text (cadr selected))
+         (ephemeral-messages
           (append
            (list system)
+           (if (null? context-paths)
+               '()
+               (list
+                (make-message
+                 "system"
+                 (string-append
+                  "Authoritative project context selected by agent-select-context "
+                  "for this turn. Prefer it over earlier answers when they conflict.\n\n"
+                  context-text))))))
+         (ephemeral-count (length ephemeral-messages))
+         (working
+          (append
+           ephemeral-messages
            history
            (list (make-message "user" transformed-line)))))
     (let loop ((messages working) (round 0))
       (let* ((outcome
               (complete-with-trace
-               tracer parent provider model base-url api-key messages
+               tracer parent (generation-id generation)
+               provider model base-url api-key messages
                enabled-tools stream? thinking round))
              (completion (car outcome))
              (content-streamed? (cdr outcome))
@@ -363,9 +482,9 @@
                 (unless (string-null? (or (completion-thinking completion) ""))
                   (format #t "thinking> ~a~%" (completion-thinking completion)))
                 (format #t "assistant> ~a~%" reply))
-              ;; Drop the current system message. The active generation supplies
-              ;; a fresh one at the start of every user turn.
-              (list (cdr with-assistant) reply))
+              ;; Drop this turn's system prompt and selected context. The active
+              ;; generation supplies both afresh for every user turn.
+              (list (list-tail with-assistant ephemeral-count) reply))
             (begin
               (when (>= round max-rounds)
                 (error "tool round limit reached" max-rounds))

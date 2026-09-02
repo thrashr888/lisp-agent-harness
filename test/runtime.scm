@@ -16,6 +16,7 @@
    "(define agent-system-prompt \"fixture prompt\")\n"
    "(define agent-tools '(read))\n"
    "(define agent-shell-policy 'deny)\n"
+   "(define (agent-select-context text) '(\"README.md\"))\n"
    "(define (agent-transform-user text) text)\n"
    "(define (agent-demo-response text) (string-append \"old: \" (agent-transform-user text)))\n"))
 
@@ -52,12 +53,38 @@
   "old: HELLO"
   (generation-call (runtime-current runtime) 'agent-demo-response "hello"))
 
+(runtime-eval!
+ runtime
+ "(define (agent-select-context text) '(\"LICENSE\"))")
+
+(test-equal "context selection is live"
+  '("LICENSE")
+  (generation-call (runtime-current runtime) 'agent-select-context "license"))
+
+(test-error "latent selector errors are rejected before activation"
+  #t
+  (runtime-eval!
+   runtime
+   "(define (agent-select-context text) (missing-predicate text))"))
+
+(test-equal "failed selector never activates"
+  3
+  (generation-id (runtime-current runtime)))
+
+(runtime-eval!
+ runtime
+ "(define (agent-select-context text) (cond ((string-contains? text \"license\") '(\"LICENSE\")) (else '())))")
+
+(test-equal "common selector vocabulary is available to live code"
+  '("LICENSE")
+  (generation-call (runtime-current runtime) 'agent-select-context "read license"))
+
 (test-error "invalid authority policy is rejected"
   #t
   (runtime-eval! runtime "(define agent-shell-policy 'allow)"))
 
 (test-equal "failed eval never activates"
-  2
+  4
   (generation-id (runtime-current runtime)))
 
 (test-error "live image cannot call ambient process APIs"
@@ -65,13 +92,13 @@
   (runtime-eval! runtime "(system* \"touch\" \"/tmp/should-not-exist\")"))
 
 (test-equal "failed authority escape never activates"
-  2
+  4
   (generation-id (runtime-current runtime)))
 
 (runtime-rollback! runtime)
 
 (test-equal "rollback restores the prior module"
-  "old: hello"
+  "old: HELLO"
   (generation-call (runtime-current runtime) 'agent-demo-response "hello"))
 
 (test-assert "journal exists"

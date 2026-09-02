@@ -29,6 +29,7 @@
     agent-system-prompt
     agent-tools
     agent-shell-policy
+    agent-select-context
     agent-transform-user
     agent-demo-response))
 
@@ -38,13 +39,14 @@
 (define safe-bindings
   '(define define* define-values define-syntax syntax-rules
     lambda quote quasiquote unquote unquote-splicing begin
-    if cond case and or when unless let let* letrec letrec* set!
+    if cond case else => and or when unless let let* letrec letrec* set!
     values call-with-values apply
     boolean? not eq? eqv? equal?
     number? integer? exact? inexact? zero? positive? negative?
     + - * / = < > <= >= max min abs modulo remainder quotient
     string? string string-length string-ref substring
     string-append string=? string-ci=? string-upcase string-downcase
+    string-contains
     string-trim string-trim-right string-trim-both
     symbol? symbol->string string->symbol keyword?
     char? char=? char-ci=? char-alphabetic? char-numeric? char-whitespace?
@@ -88,6 +90,12 @@
     (module-use!
      module
      (resolve-interface '(guile) #:select safe-bindings))
+    ;; A boolean spelling is easier for models to generate than Guile's
+    ;; index-or-#f string-contains primitive. Keep both available.
+    (module-define!
+     module 'string-contains?
+     (lambda (text fragment)
+       (if (string-contains text fragment) #t #f)))
     module))
 
 (define (eval-all! text module)
@@ -137,6 +145,24 @@
   (let ((rounds (module-ref module 'agent-max-tool-rounds)))
     (unless (and (integer? rounds) (>= rounds 0) (<= rounds 8))
       (error "agent-max-tool-rounds must be an integer from 0 through 8" rounds)))
+  (let ((selector (module-ref module 'agent-select-context)))
+    (unless (procedure? selector)
+      (error "agent-select-context must be a procedure"))
+    ;; Exercise both the empty and demo-shaped branches before activation so a
+    ;; generated function with a latent unbound helper is rejected atomically.
+    (for-each
+     (lambda (probe)
+       (let ((paths (selector probe)))
+         (unless (and (list? paths)
+                      (<= (length paths) 8)
+                      (every (lambda (path)
+                               (and (string? path)
+                                    (not (string-null? path))))
+                             paths))
+           (error
+            "agent-select-context must return at most eight non-empty paths"
+            paths))))
+     '("" "atlas production deployment port")))
   #t)
 
 (define (build-generation id source-path source-text patches)
