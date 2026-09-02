@@ -70,6 +70,8 @@ automatically with `make demo-context-scripted`. The first answer comes from the
 generation 2. `/traces` and Phoenix show both selected paths and exactly which
 generation produced each answer. See `demo/context-selection/README.md`.
 
+![Live context selector repaired between generations](docs/assets/context-repair-demo.gif)
+
 ## Ollama default
 
 Start Ollama, confirm the model is installed, and run the harness:
