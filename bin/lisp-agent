@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+exec guile \
+  --no-auto-compile \
+  -L "$project_root/src" \
+  -s "$project_root/src/live-agent/main.scm" \
+  --agent "$project_root/agent/default.scm" \
+  --state-dir "$project_root/.lisp-agent" \
+  "$@"
