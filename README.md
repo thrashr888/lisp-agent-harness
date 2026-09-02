@@ -126,3 +126,7 @@ and record stable references.
 Run a real coding session and change prompt construction or tool selection after
 observing a failure. The project is only interesting if that intervention is
 more legible and useful than editing and restarting a conventional extension.
+
+## License
+
+[MIT](LICENSE) © 2026 Paul Thrasher.
