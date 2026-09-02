@@ -4,6 +4,7 @@ run:
 	./bin/lisp-agent
 
 test:
+	GUILE_AUTO_COMPILE=0 guile -L src test/default-agent.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/json.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/provider.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/tools.scm

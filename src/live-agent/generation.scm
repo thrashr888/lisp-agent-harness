@@ -2,6 +2,7 @@
   #:use-module (ice-9 exceptions)
   #:use-module (ice-9 format)
   #:use-module (ice-9 textual-ports)
+  #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-9)
   #:export (generation?
             generation-id
@@ -105,6 +106,21 @@
   (let ((policy (module-ref module 'agent-shell-policy)))
     (unless (memq policy '(deny ask))
       (error "agent-shell-policy must be deny or ask" policy)))
+  (let ((model (module-ref module 'agent-model))
+        (base-url (module-ref module 'agent-base-url))
+        (key-environment
+         (module-ref module 'agent-api-key-environment))
+        (tools (module-ref module 'agent-tools)))
+    (unless (and (string? model) (not (string-null? model)))
+      (error "agent-model must be a non-empty string" model))
+    (unless (and (string? base-url) (not (string-null? base-url)))
+      (error "agent-base-url must be a non-empty string" base-url))
+    (unless (or (not key-environment) (string? key-environment))
+      (error "agent-api-key-environment must be a string or #f"
+             key-environment))
+    (unless (and (list? tools)
+                 (every (lambda (tool) (memq tool '(read shell))) tools))
+      (error "agent-tools may contain only read and shell" tools)))
   (let ((rounds (module-ref module 'agent-max-tool-rounds)))
     (unless (and (integer? rounds) (>= rounds 0) (<= rounds 8))
       (error "agent-max-tool-rounds must be an integer from 0 through 8" rounds)))

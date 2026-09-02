@@ -2,9 +2,9 @@
 ;; You can also redefine any binding transactionally with /eval.
 
 (define agent-name "default")
-(define agent-model "demo")
-(define agent-base-url "https://api.openai.com/v1")
-(define agent-api-key-environment "OPENAI_API_KEY")
+(define agent-model "qwen3.8:27b-mlx")
+(define agent-base-url "http://127.0.0.1:11434/v1")
+(define agent-api-key-environment #f)
 (define agent-max-tool-rounds 6)
 
 (define agent-system-prompt

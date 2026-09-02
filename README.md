@@ -10,7 +10,9 @@ better than editing and restarting a conventional extension.
 
 ## Try the live loop
 
-Requirements: Guile 3.0.
+Requirements: Guile 3.0 and [Ollama](https://docs.ollama.com/). The checked-in
+image defaults to the locally installed, tool-capable `qwen3.8:27b-mlx` model at
+`http://127.0.0.1:11434/v1`.
 
 ```sh
 make test
@@ -21,38 +23,56 @@ At the prompt:
 
 ```text
 live-agent> hello
-[default · live generation] hello
+...model response...
 
-live-agent> /eval (define (agent-transform-user text) (string-upcase text))
+live-agent> /eval (define agent-system-prompt "Reply in uppercase.")
 generation 2 ...
 
 live-agent> hello
-[default · live generation] HELLO
+...response using the patched prompt...
 
 live-agent> /rollback
 generation 1 ...
 
 live-agent> hello
-[default · live generation] hello
+...response using the restored prompt...
 ```
 
 Edit `agent/default.scm` and enter `/reload` to load the file as another atomic
 generation. `/reload-clean` intentionally drops session patches.
 
-## Use a model
+## Ollama default
 
-The default `demo` model makes the live-code loop testable without credentials.
-To use any server exposing the OpenAI Chat Completions wire format, edit the
-image or redefine its bindings in the session:
+Start Ollama, confirm the model is installed, and run the harness:
+
+```sh
+ollama list
+./bin/lisp-agent
+```
+
+The selected default advertises completion, tool calling, thinking, vision, and
+a 262K context window in the local Ollama metadata. It was chosen over the
+104 GB `qwen3.8-flash-next:125b-mlx` model to keep interactive iteration
+practical. The live harness has been exercised end to end with this model making
+a `read` tool call and incorporating the result.
+
+To use another installed Ollama model, redefine it without restarting:
 
 ```text
 /eval (define agent-model "your-model-id")
-/eval (define agent-base-url "https://your-provider.example/v1")
 ```
 
-The default image reads a credential from `OPENAI_API_KEY`. The base URL can
-point to a local server that does not require a key. Requests are currently
-non-streaming.
+For a remote OpenAI-compatible provider, also redefine `agent-base-url` and the
+name of the environment variable holding its credential:
+
+```text
+/eval (define agent-base-url "https://your-provider.example/v1")
+/eval (define agent-api-key-environment "OPENAI_API_KEY")
+```
+
+Set the environment variable before launching the process. Requests are
+currently non-streaming. To exercise live generations without any model, set
+`agent-model` to `"demo"`.
 
 The model can call `read` and `shell`. Reads are canonicalized and restricted to
 the process working directory. Shell commands require an explicit confirmation

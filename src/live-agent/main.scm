@@ -45,11 +45,13 @@
 (define (show-generation runtime)
   (let ((generation (runtime-current runtime)))
     (format #t
-            "generation ~a  fingerprint ~a~%agent ~a  model ~a~%tools ~s  shell ~s  patches ~a~%source ~a~%"
+            "generation ~a  fingerprint ~a~%agent ~a  model ~a~%endpoint ~a  api-key-env ~s~%tools ~s  shell ~s  patches ~a~%source ~a~%"
             (generation-id generation)
             (generation-fingerprint generation)
             (generation-ref generation 'agent-name)
             (generation-ref generation 'agent-model)
+            (generation-ref generation 'agent-base-url)
+            (generation-ref generation 'agent-api-key-environment)
             (generation-ref generation 'agent-tools)
             (generation-ref generation 'agent-shell-policy)
             (length (generation-patches generation))
