@@ -98,6 +98,41 @@
        (string-contains (tool-result-output rg-result) "notes.txt:1")
        (string-contains (tool-result-output rg-result) "notes.txt:2")))
 
+(define literal-rg-result
+  (execute-tool
+   "rg"
+   (json-object (cons "query" "alpha port 9443 (") (cons "path" "."))
+   tool-root 'deny (lambda _ #f)))
+
+(test-equal "rg treats punctuation as literal by default"
+  "No matches."
+  (tool-result-output literal-rg-result))
+
+(define regex-rg-result
+  (execute-tool
+   "rg"
+   (json-object (cons "query" "port [0-9]+")
+                (cons "path" ".")
+                (cons "regex" #t))
+   tool-root 'deny (lambda _ #f)))
+
+(test-assert "rg supports explicit regular expressions"
+  (and (tool-result-success? regex-rg-result)
+       (string-contains (tool-result-output regex-rg-result) "notes.txt:1")))
+
+(define invalid-regex-result
+  (execute-tool
+   "rg"
+   (json-object (cons "query" "(unclosed")
+                (cons "path" ".")
+                (cons "regex" #t))
+   tool-root 'deny (lambda _ #f)))
+
+(test-assert "rg labels invalid explicit regular expressions"
+  (and (not (tool-result-success? invalid-regex-result))
+       (string-contains (tool-result-output invalid-regex-result)
+                        "regular expression is invalid")))
+
 (define escaped-write
   (execute-tool
    "write"

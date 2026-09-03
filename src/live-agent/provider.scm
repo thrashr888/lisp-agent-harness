@@ -94,11 +94,19 @@
    ((string=? name "rg")
     (function-tool
      "rg"
-     "Search project text with ripgrep without invoking a shell. Results are bounded and project-confined."
+     (string-append
+      "Search project text with ripgrep without invoking a shell. Queries are "
+      "literal by default, so punctuation such as Scheme parentheses is safe. "
+      "Set regex to true only when regular-expression behavior is intentional. "
+      "Results are bounded and project-confined.")
      (json-object
-      (cons "query" (string-parameter "Literal or regular-expression search query"))
+      (cons "query" (string-parameter "Text to find; interpreted literally unless regex is true"))
       (cons "path" (string-parameter "Optional project-relative file or directory; defaults to ."))
-      (cons "glob" (string-parameter "Optional ripgrep glob such as *.scm")))
+      (cons "glob" (string-parameter "Optional ripgrep glob such as *.scm"))
+      (cons "regex"
+            (json-object
+             (cons "type" "boolean")
+             (cons "description" "Interpret query as a regular expression; defaults to false"))))
      '("query")))
    ((string=? name "write")
     (function-tool

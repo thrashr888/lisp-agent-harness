@@ -26,8 +26,8 @@
 (test-assert "streams output by default"
   (generation-ref generation 'agent-stream?))
 
-(test-eq "enables Qwen thinking with the native boolean"
-  #t
+(test-eq "hides model thinking by default"
+  #f
   (generation-ref generation 'agent-thinking))
 
 (test-assert "agent can change its constrained live image"

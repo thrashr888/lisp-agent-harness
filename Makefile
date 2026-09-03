@@ -32,6 +32,7 @@ test:
 	GUILE_AUTO_COMPILE=0 guile -L src test/extensions.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/runtime.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/trace.scm
+	python3 test/session_bridge_test.py
 
 check: test
 	GUILE_AUTO_COMPILE=0 guild compile -L src -o /tmp/live-agent-generation.go src/live-agent/generation.scm

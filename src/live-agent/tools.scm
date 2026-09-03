@@ -179,11 +179,14 @@
 (define (run-rg arguments working-directory)
   (let* ((query (require-string arguments "query"))
          (requested (json-object-ref arguments "path" "."))
-         (glob (json-object-ref arguments "glob" #f)))
+         (glob (json-object-ref arguments "glob" #f))
+         (regex? (json-object-ref arguments "regex" #f)))
     (when (string-null? query) (error "rg query cannot be empty"))
     (unless (string? requested) (error "rg path must be a string"))
     (unless (or (not glob) (string? glob))
       (error "rg glob must be a string"))
+    (unless (boolean? regex?)
+      (error "rg regex must be a boolean"))
     (let* ((resolved (resolve-existing-path requested working-directory "rg"))
            (root (car resolved))
            (candidate (cadr resolved))
@@ -191,18 +194,48 @@
             (append
              '("--line-number" "--color=never" "--no-heading"
                "--max-count" "200" "--max-filesize" "1M")
+             (if regex? '() '("--fixed-strings"))
              (if glob (list "--glob" glob) '())
              (list "--" query candidate)))
-           (port (apply open-pipe* OPEN_READ "rg" arguments))
-           (output (get-string-all port))
-           (status (close-pipe port))
-           (exit-code (status:exit-val status)))
+           (error-template
+            (string-append "/tmp/lisp-agent-rg-error-"
+                           (number->string (getpid)) "-XXXXXX"))
+           (error-port (mkstemp error-template))
+           (error-path (port-filename error-port))
+           (result
+            (dynamic-wind
+              (lambda () #t)
+              (lambda ()
+                (let* ((port
+                        (with-error-to-port
+                         error-port
+                         (lambda ()
+                           (apply open-pipe* OPEN_READ "rg" arguments))))
+                       (output (get-string-all port))
+                       (status (close-pipe port)))
+                  (force-output error-port)
+                  (seek error-port 0 SEEK_SET)
+                  (list output (get-string-all error-port)
+                        (status:exit-val status))))
+              (lambda ()
+                (unless (port-closed? error-port) (close-port error-port))
+                (when (file-exists? error-path) (delete-file error-path)))))
+           (output (car result))
+           (error-output (cadr result))
+           (exit-code (caddr result)))
       (cond
        ((= exit-code 0)
         (bounded
          (replace-occurrences output (string-append root "/") "")))
        ((= exit-code 1) "No matches.")
-       (else (error "rg failed" exit-code (bounded output)))))))
+       (else
+        (error
+         (if regex?
+             "rg regular expression is invalid or rg failed"
+             "rg failed")
+         exit-code
+         (bounded
+          (if (string-null? error-output) output error-output))))))))
 
 (define (run-shell arguments working-directory policy confirm)
   (let ((command (json-object-ref arguments "command")))

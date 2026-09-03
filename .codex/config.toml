@@ -1,0 +1,9 @@
+[mcp_servers.lisp-agent]
+command = "./bin/lisp-agent-mcp"
+cwd = "."
+startup_timeout_sec = 10
+tool_timeout_sec = 600
+default_tools_approval_mode = "auto"
+
+[mcp_servers.lisp-agent.tools.live_session_approve]
+approval_mode = "approve"

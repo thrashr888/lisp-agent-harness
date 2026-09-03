@@ -1,6 +1,7 @@
 (define-module (live-agent main)
   #:use-module (ice-9 exceptions)
   #:use-module (ice-9 format)
+  #:use-module (ice-9 popen)
   #:use-module (ice-9 readline)
   #:use-module (ice-9 textual-ports)
   #:use-module (srfi srfi-1)
@@ -37,6 +38,8 @@
    (string-append
     "Commands:\n"
     "  /show             inspect the active generation\n"
+    "  /thinking [MODE]  show or set off/on/low/medium/high\n"
+    "  /stream [on|off]  show or set streaming output\n"
     "  /eval EXPR        transactionally add a live Scheme definition\n"
     "  /reload           reload the agent file and retain live patches\n"
     "  /reload-clean     reload the file without live patches\n"
@@ -69,6 +72,27 @@
             (generation-ref generation 'agent-shell-policy)
             (length (generation-patches generation))
             (generation-source-path generation))))
+
+(define (short-fingerprint value)
+  (substring value 0 (min 12 (string-length value))))
+
+(define (enabled-label value)
+  (if value "on" "off"))
+
+(define (show-banner runtime)
+  (let ((generation (runtime-current runtime)))
+    (format #t
+            "~%lisp-agent λ~%  ~a · generation ~a · ~a~%  ~a via ~a~%  stream ~a · thinking ~a · ~a tools · shell ~a~%  /help for commands~%~%"
+            (generation-ref generation 'agent-name)
+            (generation-id generation)
+            (short-fingerprint (generation-fingerprint generation))
+            (generation-ref generation 'agent-model)
+            (generation-ref generation 'agent-provider)
+            (enabled-label (generation-ref generation 'agent-stream?))
+            (let ((thinking (generation-ref generation 'agent-thinking)))
+              (if (boolean? thinking) (enabled-label thinking) thinking))
+            (length (generation-ref generation 'agent-tools))
+            (generation-ref generation 'agent-shell-policy))))
 
 (define (exception-detail exception)
   (catch #t
@@ -217,10 +241,67 @@
    (generation-patches (runtime-current runtime))
    description))
 
+(define (set-live-setting! runtime label binding source-value display-value)
+  (when
+      (try-transition
+       label
+       (lambda ()
+         (runtime-eval!
+          runtime
+          (format #f "(set! ~a ~a)" binding source-value))))
+    (format #t "~a ~a · generation ~a~%"
+            label display-value
+            (generation-id (runtime-current runtime)))))
+
+(define (handle-thinking-command runtime line)
+  (let* ((generation (runtime-current runtime))
+         (current (generation-ref generation 'agent-thinking))
+         (value
+          (if (string=? line "/thinking")
+              ""
+              (trimmed-command-argument line "/thinking "))))
+    (cond
+     ((string-null? value)
+      (format #t "thinking ~a~%"
+              (if (boolean? current) (enabled-label current) current)))
+     ((string=? value "off")
+      (set-live-setting! runtime "thinking" 'agent-thinking "#f" "off"))
+     ((string=? value "on")
+      (set-live-setting! runtime "thinking" 'agent-thinking "#t" "on"))
+     ((member value '("low" "medium" "high"))
+      (set-live-setting!
+       runtime "thinking" 'agent-thinking
+       (string-append "'" value) value))
+     (else
+      (format (current-error-port)
+              "thinking mode must be off, on, low, medium, or high~%")))))
+
+(define (handle-stream-command runtime line)
+  (let* ((generation (runtime-current runtime))
+         (current (generation-ref generation 'agent-stream?))
+         (value
+          (if (string=? line "/stream")
+              ""
+              (trimmed-command-argument line "/stream "))))
+    (cond
+     ((string-null? value) (format #t "stream ~a~%" (enabled-label current)))
+     ((string=? value "off")
+      (set-live-setting! runtime "stream" 'agent-stream? "#f" "off"))
+     ((string=? value "on")
+      (set-live-setting! runtime "stream" 'agent-stream? "#t" "on"))
+     (else
+      (format (current-error-port) "stream mode must be off or on~%")))))
+
 (define (handle-command runtime tracer line)
   (cond
    ((string=? line "/help") (show-help) 'continue)
    ((string=? line "/show") (show-generation runtime) 'continue)
+   ((or (string=? line "/thinking") (string-prefix? "/thinking " line))
+    (handle-thinking-command runtime line)
+    'continue)
+   ((or (string=? line "/stream") (string-prefix? "/stream " line))
+    (handle-stream-command runtime line)
+    'continue)
    ((string=? line "/generations") (show-generations runtime) 'continue)
    ((string=? line "/extensions") (show-extensions runtime) 'continue)
    ((string=? line "/traces") (show-traces tracer) 'continue)
@@ -314,12 +395,48 @@
       (readline prompt)
       (get-line (current-input-port))))
 
+(define (terminal-settings)
+  (catch #t
+    (lambda ()
+      (let* ((port (open-pipe* OPEN_READ "/bin/stty" "-g"))
+             (value (string-trim-both (get-string-all port)))
+             (status (close-pipe port)))
+        (and (= (status:exit-val status) 0)
+             (not (string-null? value))
+             value)))
+    (lambda _ #f)))
+
+(define (read-approval-key prompt)
+  (display prompt)
+  (force-output)
+  (if (not (isatty? (current-input-port)))
+      (read-user-line "")
+      (let ((saved (terminal-settings)))
+        (if (not saved)
+            (read-user-line "")
+            (let ((status
+                   (system* "/bin/stty" "-icanon" "min" "1" "time" "0"
+                            "-echo")))
+              (if (not (= (status:exit-val status) 0))
+                  (read-user-line "")
+                  (let ((answer
+                         (dynamic-wind
+                           (lambda () #t)
+                           (lambda () (read-char (current-input-port)))
+                           (lambda () (system* "/bin/stty" saved)))))
+                    (unless (eof-object? answer) (write-char answer))
+                    (newline)
+                    answer)))))))
+
 (define (confirm-shell command)
   (format #t "\nShell requests:\n  ~a~%" command)
   (force-output)
-  (let ((answer (read-user-line "Approve this command? [y/N] ")))
-    (and (string? answer)
-         (member (string-downcase (string-trim-both answer)) '("y" "yes")))))
+  (let ((answer (read-approval-key "Approve this command? [y/N] ")))
+    (cond
+     ((char? answer) (char-ci=? answer #\y))
+     ((string? answer)
+      (member (string-downcase (string-trim-both answer)) '("y" "yes")))
+     (else #f))))
 
 (define (record-input! runtime generation turn-count line)
   (runtime-record!
@@ -756,8 +873,7 @@
       #:unwind? #t)))
 
 (define (repl runtime tracer)
-  (show-generation runtime)
-  (display "Enter text to exercise the live image, or /help.\n")
+  (show-banner runtime)
   (force-output)
   (let loop ((turn-count 1) (history '()))
     (let ((line (read-user-line "live-agent> ")))

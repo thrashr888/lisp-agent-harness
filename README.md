@@ -20,6 +20,16 @@ make test
 ./bin/lisp-agent
 ```
 
+Boot is deliberately compact:
+
+```text
+lisp-agent λ
+  default · generation 1 · 0123456789ab
+  qwen3.8:27b-mlx via ollama
+  stream on · thinking off · 7 tools · shell ask
+  /help for commands
+```
+
 At the prompt:
 
 ```text
@@ -120,11 +130,18 @@ a 262K context window in the local Ollama metadata. It was chosen over the
 practical. The live harness has been exercised end to end with this model making
 a `read` tool call and incorporating the result.
 
-Native Ollama output streams by default. `agent-thinking` may be `#t`, `#f`, or
+Native Ollama output streams by default. Thinking is hidden by default;
+`agent-thinking` may be `#t`, `#f`, or
 the model-specific levels `'low`, `'medium`, and `'high`; `agent-stream?`
-controls streaming. All are live:
+controls streaming. Both have direct live settings:
 
 ```text
+/thinking
+/thinking medium
+/thinking off
+/stream off
+/stream on
+
 /eval (define agent-model "your-model-id")
 /eval (define agent-thinking 'medium)
 /eval (define agent-stream? #f)
@@ -145,12 +162,43 @@ generations without any model, set `agent-model` to `"demo"`.
 
 The model can call `read`, `rg`, `write`, `edit`, `shell`, `live_eval`, and
 `extension`. File operations are canonicalized and restricted to the process
-working directory. `rg` invokes ripgrep directly, `write` replaces a complete
+working directory. `rg` invokes ripgrep directly and treats queries literally
+by default; its explicit `regex: true` mode is for intentional regular
+expressions. `write` replaces a complete
 file atomically, and `edit` requires an exact unique match unless `replace_all`
 is explicit. Shell commands require a confirmation for every call; the live
-image can tighten that policy to `deny`, but cannot set ambient `allow`.
+image can tighten that policy to `deny`, but cannot set ambient `allow`. In an
+interactive terminal the approval consumes one `y` or `N` keystroke immediately,
+without waiting for Enter.
 `live_eval` can only use the curated Scheme surface and cannot introduce
 process, filesystem, network, dynamic-loading, or ambient evaluation authority.
+
+## Attach from Codex
+
+The repository includes a project-scoped MCP server in `.codex/config.toml`.
+Open this trusted repository as a Codex project (or restart the Codex task after
+pulling the config), then Codex can operate one managed live harness session
+through typed tools:
+
+- start, inspect, read, prompt, approve, and stop the session
+- set thinking or streaming and apply restricted live Scheme expressions
+- append system-prompt guidance for later turns
+- list, create, load, disable, and export extensions
+
+The bridge launches the same `bin/lisp-agent` under a pseudo-terminal, so it
+sees the real streaming output and approval boundaries rather than a parallel
+mock implementation. A prompt call returns at either the next `live-agent>`
+prompt or a shell approval; Codex must then call the separate approval tool with
+an explicit boolean. That tool is approval-gated in the Codex project config and
+refuses input unless a shell request is actually pending. The bridge process owns this session, and all activity
+continues to use the normal journal and trace paths under
+`.lisp-agent/codex-session`.
+
+Run the MCP server directly for protocol debugging with:
+
+```sh
+./bin/lisp-agent-mcp
+```
 
 ## Traces and Phoenix
 
@@ -230,8 +278,11 @@ src/live-agent/trace.scm      JSONL spans and optional OTLP bridge
 src/live-agent/tools.scm      stable capability checks
 src/live-agent/json.scm       dependency-free JSON codec
 src/live-agent/main.scm       interactive shell
+scripts/session_bridge.py     dependency-free MCP-to-live-PTY bridge
+bin/lisp-agent-mcp            project-scoped Codex MCP entry point
+.codex/config.toml            local MCP registration for trusted projects
 extensions/README.md          artifact contract
-test/*.scm                    runtime, provider, JSON, extension, and tool tests
+test/*                        Scheme runtime tests plus MCP integration test
 ```
 
 Journal and trace attribute values larger than 4 KiB are truncated. Tool output

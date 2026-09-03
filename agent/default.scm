@@ -7,7 +7,7 @@
 (define agent-base-url "http://127.0.0.1:11434")
 (define agent-api-key-environment #f)
 (define agent-stream? #t)
-(define agent-thinking #t)
+(define agent-thinking #f)
 (define agent-max-tool-rounds 6)
 
 (define agent-system-prompt
