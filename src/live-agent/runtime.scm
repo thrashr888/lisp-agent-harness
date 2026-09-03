@@ -3,6 +3,7 @@
   #:use-module (ice-9 ftw)
   #:use-module (ice-9 threads)
   #:use-module (ice-9 textual-ports)
+  #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-9)
   #:use-module (live-agent generation)
   #:export (runtime?
@@ -90,22 +91,48 @@
    ((equal? value (car items)) (cdr items))
    (else (cons (car items) (remove-first value (cdr items))))))
 
-(define (make-runtime source-path state-directory)
+(define* (make-runtime source-path state-directory
+                       #:optional (patches '()) (restored-generation-id 1)
+                       (expected-fingerprint #f))
+  (unless (and (integer? restored-generation-id)
+               (> restored-generation-id 0))
+    (error "generation id must be a positive integer"
+           restored-generation-id))
+  (unless (and (list? patches) (every string? patches)
+               (<= (length patches) max-live-patches))
+    (error "invalid restored live patches" patches))
   (ensure-directory! state-directory)
   (let* ((journal-path (string-append state-directory "/events.scm-log"))
          (source-text (read-source-file source-path))
-         (generation (build-generation 1 source-path source-text '()))
+         (candidate
+          (build-generation
+           restored-generation-id source-path source-text patches))
+         ;; If source changed while a durable session was stopped, that is a
+         ;; new behavior generation. Never reuse an old generation number for
+         ;; a different fingerprint in traces.
+         (generation
+          (if (and expected-fingerprint
+                   (not (string=? expected-fingerprint
+                                  (generation-fingerprint candidate))))
+              (build-generation (+ restored-generation-id 1)
+                                source-path source-text patches)
+              candidate))
          ;; Reloads may arrive from a watcher while a model turn is using a
          ;; pinned generation. Serialize transitions and journal appends; the
          ;; recursive flavor permits activate! to record inside a transition.
          (runtime
-          (%make-runtime generation '() 2 journal-path
+          (%make-runtime generation '() (+ (generation-id generation) 1)
+                         journal-path
                          (make-recursive-mutex))))
     (runtime-record!
      runtime
      'runtime-started
-     `((generation . 1)
+     `((generation . ,(generation-id generation))
        (source . ,source-path)
+       (patch-count . ,(length patches))
+       (resumed-source-changed . ,(if (= restored-generation-id
+                                          (generation-id generation))
+                                      #f #t))
        (fingerprint . ,(generation-fingerprint generation))))
     runtime))
 

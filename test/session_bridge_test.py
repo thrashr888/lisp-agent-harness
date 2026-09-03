@@ -186,6 +186,82 @@ class McpBridgeTest(unittest.TestCase):
         stopped = self.call("live_session_stop")
         self.assertFalse(stopped["running"])
 
+    def test_named_sessions_run_independently_and_resume(self):
+        alpha = self.call(
+            "live_session_start",
+            {"session": "alpha", "mode": "new", "agent": "test/session-agent.scm"},
+        )
+        beta = self.call(
+            "live_session_start",
+            {"session": "beta", "mode": "new", "agent": "test/session-agent.scm"},
+        )
+        self.assertNotEqual(alpha["pid"], beta["pid"])
+
+        self.assertIn(
+            "[mcp-test] alpha message",
+            self.call(
+                "live_session_send",
+                {"session": "alpha", "text": "alpha message"},
+            )["output"],
+        )
+        self.assertIn(
+            "[mcp-test] beta message",
+            self.call(
+                "live_session_send",
+                {"session": "beta", "text": "beta message"},
+            )["output"],
+        )
+        self.call(
+            "live_session_set",
+            {"session": "alpha", "name": "thinking", "value": "on"},
+        )
+
+        sessions = self.call("live_sessions_list")["sessions"]
+        self.assertEqual([entry["session"] for entry in sessions], ["alpha", "beta"])
+        self.assertTrue(all(entry["running"] for entry in sessions))
+
+        self.call("live_session_stop", {"session": "alpha"})
+        resumed = self.call(
+            "live_session_start",
+            {"session": "alpha", "mode": "resume", "agent": "test/session-agent.scm"},
+        )
+        self.assertIn("session alpha · resumed · turn 2", resumed["output"])
+        self.assertIn("generation 2", resumed["output"])
+        self.assertEqual(resumed["next_turn"], 2)
+        self.assertEqual(resumed["generation"], 2)
+        self.assertTrue(
+            self.call("live_session_status", {"session": "beta"})["running"]
+        )
+
+        self.call("live_session_stop", {"session": "alpha"})
+        existing = self.rpc(
+            "tools/call",
+            {
+                "name": "live_session_start",
+                "arguments": {
+                    "session": "alpha",
+                    "mode": "new",
+                    "agent": "test/session-agent.scm",
+                },
+            },
+        )
+        self.assertTrue(existing.get("isError"))
+        self.assertIn("already exists", existing["content"][0]["text"])
+
+        missing = self.rpc(
+            "tools/call",
+            {
+                "name": "live_session_start",
+                "arguments": {
+                    "session": "missing",
+                    "mode": "resume",
+                    "agent": "test/session-agent.scm",
+                },
+            },
+        )
+        self.assertTrue(missing.get("isError"))
+        self.assertIn("does not exist", missing["content"][0]["text"])
+
 
 class ExtensionToolMappingTest(unittest.TestCase):
     def test_every_extension_action_maps_to_the_live_repl(self):
@@ -198,7 +274,10 @@ class ExtensionToolMappingTest(unittest.TestCase):
                 return {"state": "ready", "output": command, "cursor": 1}
 
         session = RecordingSession()
-        server = McpServer(session)
+        state_root = Path(tempfile.mkdtemp(prefix="lisp-agent-recording-test-"))
+        server = McpServer(
+            ROOT, state_root, lambda project_root, state_dir, name: session
+        )
         server.call_tool("live_extension", {"action": "list"})
         server.call_tool(
             "live_extension",
@@ -217,6 +296,7 @@ class ExtensionToolMappingTest(unittest.TestCase):
                 "/extension-export snapshot",
             ],
         )
+        shutil.rmtree(state_root, ignore_errors=True)
 
 
 class HotReloadTest(unittest.TestCase):

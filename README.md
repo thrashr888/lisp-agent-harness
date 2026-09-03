@@ -58,6 +58,34 @@ generation active, and is retried after the file changes again. `/reload` is
 still available explicitly; `/reload-clean` intentionally drops session patches.
 Pass `--no-watch` to disable automatic source watching.
 
+## Durable named sessions
+
+Use a named session when the conversation and live behavior should survive a
+process restart:
+
+```sh
+./bin/lisp-agent --session dogfood       # resume if present, otherwise create
+./bin/lisp-agent --new-session spike-2   # fail if the name already exists
+./bin/lisp-agent --resume dogfood        # fail if it does not exist
+./bin/lisp-agent --list-sessions
+```
+
+The checkpoint at `.lisp-agent/sessions/NAME/session.json` is atomically
+rewritten after successful turns and interactive mutations. It stores the
+provider message history, next turn number, active live-patch source, generation
+number, and a stable session ID. Resume rebuilds a fresh Scheme module from the
+current agent source plus those validated patches; it never deserializes a live
+Guile object. Traces before and after restart therefore share `session.id` and
+`session.name` while retaining the exact generation that produced each result.
+
+`/session` shows the current identity and checkpoint. `/reset` clears the
+persisted conversation but intentionally keeps live behavior. The rollback
+stack is process-local in this version: the active patch stack resumes, but
+older in-memory generations do not. Checkpoints are bounded at 8 MiB and 2,000
+messages; large artifacts belong in files with references in the conversation.
+An advisory owner lock prevents two processes from opening and overwriting the
+same named session concurrently; different names remain fully concurrent.
+
 The agent has the same constrained mechanism as the user. For example, ask:
 
 ```text
@@ -182,28 +210,35 @@ process, filesystem, network, dynamic-loading, or ambient evaluation authority.
 
 The repository includes a project-scoped MCP server in `.codex/config.toml`.
 Open this trusted repository as a Codex project (or restart the Codex task after
-pulling the config), then Codex can operate one managed live harness session
+pulling the config), then Codex can operate multiple named live harness sessions
 through typed tools:
 
-- start, inspect, read, prompt, approve, and stop the session
+- list, create, resume, inspect, read, prompt, approve, and stop named sessions
 - set thinking or streaming and apply restricted live Scheme expressions
 - append system-prompt guidance for later turns
 - list, create, load, disable, and export extensions
 
-The bridge launches the same `bin/lisp-agent` under a pseudo-terminal, so it
+Each name maps to an independent child process and durable checkpoint. The
+bridge launches the same `bin/lisp-agent` under a pseudo-terminal, so it
 sees the real streaming output and approval boundaries rather than a parallel
 mock implementation. A prompt call returns at either the next `live-agent>`
 prompt or a shell approval; Codex must then call the separate approval tool with
 an explicit boolean. That tool is approval-gated in the Codex project config and
 refuses input unless a shell request is actually pending. The bridge process
-owns this session, and all activity continues to use the normal journal and
-trace paths under `.lisp-agent/codex-session`.
+owns running processes, while restart-safe state, journals, and traces live
+under `.lisp-agent/sessions/NAME`.
 
 Because source watching is enabled by default, Codex can edit the live agent
 image with its normal project tools and observe the running process activate
 that save. This applies to the live image, not authority-bearing stable runtime
 modules. See `docs/live-updates.md` for the boundary and a production release
 path.
+
+For the guarded “use the harness to improve the harness” loop, run
+`make dogfood` or start the `dogfood` session from Codex. Begin with docs, tests,
+or the live image; keep stable-runtime edits under external diff review and
+restart validation. See `docs/dogfooding.md` for the concrete loop and remaining
+gates.
 
 Run the MCP server directly for protocol debugging with:
 
@@ -262,6 +297,8 @@ The stable runtime provides:
 - Project-confined read, search, atomic write, and exact-edit capabilities
 - Named, non-overwriting Scheme extension artifacts that can be loaded,
   disabled, or exported from active live patches
+- Atomic named-session checkpoints with conversation, active patches,
+  generation continuity, and stable trace identity
 - Hard authority validation (`agent-shell-policy` may be `deny` or `ask`, never
   ambient `allow`)
 
@@ -284,6 +321,7 @@ Failed evaluations and invalid watched saves leave the active generation intact.
 agent/default.scm             live user-owned image
 src/live-agent/generation.scm isolated module generations
 src/live-agent/runtime.scm    transitions, rollback, journal
+src/live-agent/session.scm    durable named-session checkpoints
 src/live-agent/extensions.scm persistent artifact lifecycle
 src/live-agent/provider.scm   native Ollama and Chat Completions adapters
 src/live-agent/trace.scm      JSONL spans and optional OTLP bridge

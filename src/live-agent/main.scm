@@ -11,26 +11,49 @@
   #:use-module (live-agent generation)
   #:use-module (live-agent provider)
   #:use-module (live-agent runtime)
+  #:use-module (live-agent session)
   #:use-module (live-agent trace)
   #:use-module (live-agent tools)
   #:export (main))
 
 (define (usage)
   (display
-   "Usage: lisp-agent [--agent PATH] [--state-dir PATH] [--watch|--no-watch]\n"))
+   (string-append
+    "Usage: lisp-agent [--agent PATH] [--state-dir PATH] [--watch|--no-watch]\n"
+    "                  [--session NAME|--new-session NAME|--resume NAME]\n"
+    "       lisp-agent --list-sessions [--state-dir PATH]\n")))
 
 (define (parse-arguments args)
-  (let loop ((rest args) (agent #f) (state-dir #f) (watch? #t))
+  (let loop ((rest args) (agent #f) (state-dir #f) (watch? #t)
+             (session-name #f) (session-mode #f) (list? #f))
     (cond
-     ((null? rest) (values agent state-dir watch?))
+     ((null? rest)
+      (values agent state-dir watch? session-name session-mode list?))
      ((and (pair? (cdr rest)) (string=? (car rest) "--agent"))
-      (loop (cddr rest) (cadr rest) state-dir watch?))
+      (loop (cddr rest) (cadr rest) state-dir watch?
+            session-name session-mode list?))
      ((and (pair? (cdr rest)) (string=? (car rest) "--state-dir"))
-      (loop (cddr rest) agent (cadr rest) watch?))
+      (loop (cddr rest) agent (cadr rest) watch?
+            session-name session-mode list?))
      ((string=? (car rest) "--watch")
-      (loop (cdr rest) agent state-dir #t))
+      (loop (cdr rest) agent state-dir #t session-name session-mode list?))
      ((string=? (car rest) "--no-watch")
-      (loop (cdr rest) agent state-dir #f))
+      (loop (cdr rest) agent state-dir #f session-name session-mode list?))
+     ((and (pair? (cdr rest))
+           (member (car rest) '("--session" "--new-session" "--resume")))
+      (when session-name
+        (format (current-error-port) "Only one session selector may be used.\n")
+        (exit 2))
+      (loop
+       (cddr rest) agent state-dir watch? (cadr rest)
+       (cond
+        ((string=? (car rest) "--new-session") 'new)
+        ((string=? (car rest) "--resume") 'resume)
+        (else 'auto))
+       list?))
+     ((string=? (car rest) "--list-sessions")
+      (loop (cdr rest) agent state-dir watch?
+            session-name session-mode #t))
      ((member (car rest) '("-h" "--help"))
       (usage)
       (exit 0))
@@ -57,6 +80,7 @@
     "  /extension-disable NAME      remove its exact active patch\n"
     "  /extension-export NAME       save all active patches as an artifact\n"
     "  /traces           show recent spans with generation and context choices\n"
+    "  /session          show the durable session identity and checkpoint\n"
     "  /reset            clear conversation state\n"
     "  /help             show this help\n"
     "  /quit             exit\n")))
@@ -85,7 +109,7 @@
 (define (enabled-label value)
   (if value "on" "off"))
 
-(define (show-banner runtime watch?)
+(define (show-banner runtime watch? session)
   (let ((generation (runtime-current runtime)))
     (format #t
             "~%lisp-agent λ~%  ~a · generation ~a · ~a~%  ~a via ~a~%  stream ~a · thinking ~a · watch ~a~%  ~a tools · shell ~a · /help for commands~%~%"
@@ -99,7 +123,12 @@
               (if (boolean? thinking) (enabled-label thinking) thinking))
             (enabled-label watch?)
             (length (generation-ref generation 'agent-tools))
-            (generation-ref generation 'agent-shell-policy))))
+            (generation-ref generation 'agent-shell-policy))
+    (when session
+      (format #t "  session ~a · ~a · turn ~a~%"
+              (session-name session)
+              (if (session-resumed? session) "resumed" "new")
+              (session-next-turn session)))))
 
 (define (exception-detail exception)
   (catch #t
@@ -109,7 +138,7 @@
                      (exception-irritants exception))))
     (lambda _ (format #f "~s" exception))))
 
-(define (start-agent-watcher! runtime)
+(define* (start-agent-watcher! runtime #:optional (on-reloaded (lambda () #t)))
   (let ((stopped? #f)
         (last-attempt #f))
     (define (notice-reloaded generation)
@@ -144,7 +173,9 @@
               (catch #t
                 (lambda ()
                   (let ((generation (runtime-reload-if-changed! runtime)))
-                    (when generation (notice-reloaded generation))))
+                    (when generation
+                      (on-reloaded)
+                      (notice-reloaded generation))))
                 (lambda (key . arguments)
                   (notice-rejected (format #f "~s: ~s" key arguments))))))))
         ;; Atomic editor renames can briefly make the source unreadable. Treat
@@ -353,7 +384,15 @@
      (else
       (format (current-error-port) "stream mode must be off or on~%")))))
 
-(define (handle-command runtime tracer line)
+(define (show-session session)
+  (if session
+      (format #t "session ~a~%id ~a~%checkpoint ~a/session.json~%"
+              (session-name session)
+              (session-id session)
+              (session-directory session))
+      (display "This is an ephemeral session. Start with --session NAME to persist it.\n")))
+
+(define (handle-command runtime tracer session line)
   (cond
    ((string=? line "/help") (show-help) 'continue)
    ((string=? line "/show") (show-generation runtime) 'continue)
@@ -366,6 +405,7 @@
    ((string=? line "/generations") (show-generations runtime) 'continue)
    ((string=? line "/extensions") (show-extensions runtime) 'continue)
    ((string=? line "/traces") (show-traces tracer) 'continue)
+   ((string=? line "/session") (show-session session) 'continue)
    ((string=? line "/reload")
     (when (try-transition "reload" (lambda () (runtime-reload! runtime #t)))
       (show-generation runtime))
@@ -933,49 +973,110 @@
           (list 'ok (car new-history))))
       #:unwind? #t)))
 
-(define (repl runtime tracer watch?)
-  (show-banner runtime watch?)
+(define (repl runtime tracer watch? session checkpoint!)
+  (show-banner runtime watch? session)
   (force-output)
-  (let loop ((turn-count 1) (history '()))
+  (let loop ((turn-count (if session (session-next-turn session) 1))
+             (history (if session (session-history session) '())))
     (let ((line (read-user-line "live-agent> ")))
       (cond
-       ((eof-object? line) (newline))
+       ((eof-object? line)
+        (checkpoint! history turn-count)
+        (newline))
        ((string-null? (string-trim-both line)) (loop turn-count history))
        ((string-prefix? "/" line)
-        (case (handle-command runtime tracer line)
-          ((quit) #t)
+        (case (handle-command runtime tracer session line)
+          ((quit)
+           (checkpoint! history turn-count)
+           #t)
           ((reset)
            (display "Conversation state cleared.\n")
+           (checkpoint! '() 1)
            (loop 1 '()))
-          (else (loop turn-count history))))
+          (else
+           (checkpoint! history turn-count)
+           (loop turn-count history))))
        (else
         (let ((result (perform-turn! runtime tracer history line turn-count)))
           (if result
-              (loop (+ turn-count 1) (cadr result))
+              (let ((next-turn (+ turn-count 1))
+                    (next-history (cadr result)))
+                (checkpoint! next-history next-turn)
+                (loop next-turn next-history))
               (loop turn-count history))))))))
 
 (define (main args)
   (call-with-values
       (lambda () (parse-arguments args))
-    (lambda (agent-path state-directory watch?)
+    (lambda (agent-path state-directory watch? requested-session-name session-mode list?)
       (unless (and agent-path state-directory)
         (usage)
         (exit 2))
-      (let* ((runtime
-             (try-transition
-              "startup"
-              (lambda () (make-runtime agent-path state-directory))))
-             (tracer (and runtime (make-tracer state-directory))))
+      (when list?
+        (let ((names (list-session-names state-directory)))
+          (if (null? names)
+              (display "No durable sessions.\n")
+              (for-each (lambda (name) (display name) (newline)) names)))
+        (exit 0))
+      (let* ((session
+              (and requested-session-name
+                   (try-transition
+                    "session open"
+                    (lambda ()
+                      (open-session!
+                       state-directory requested-session-name session-mode)))))
+             (runtime-state-directory
+              (if session (session-directory session) state-directory))
+             (runtime
+              (and
+               (or (not requested-session-name) session)
+               (try-transition
+                "startup"
+                (lambda ()
+                  (make-runtime
+                   agent-path runtime-state-directory
+                   (if session (session-patches session) '())
+                   (if session (session-generation-id session) 1)
+                   (and session (session-fingerprint session)))))))
+             (tracer
+              (and runtime
+                   (make-tracer
+                    runtime-state-directory
+                    (or (getenv "LISP_AGENT_OTEL_ENDPOINT")
+                        (getenv "PHOENIX_COLLECTOR_ENDPOINT"))
+                    (and session (session-id session))
+                    (and session (session-name session))))))
         (unless runtime (exit 1))
-        (let ((stop-watcher!
-               (if watch?
-                   (start-agent-watcher! runtime)
-                   (lambda () #t))))
+        (let ((checkpoint-history
+               (if session (session-history session) '()))
+              (checkpoint-turn
+               (if session (session-next-turn session) 1)))
+          (define (checkpoint! history next-turn)
+            (set! checkpoint-history history)
+            (set! checkpoint-turn next-turn)
+            (when session
+              (save-session! session runtime history next-turn)))
+          (when session
+            (runtime-record!
+             runtime
+             (if (session-resumed? session) 'session-resumed 'session-created)
+             `((session . ,(session-name session))
+               (session-id . ,(session-id session))
+               (turn . ,checkpoint-turn)))
+            (checkpoint! checkpoint-history checkpoint-turn))
+          (let ((stop-watcher!
+                 (if watch?
+                     (start-agent-watcher!
+                      runtime
+                      (lambda ()
+                        (checkpoint! checkpoint-history checkpoint-turn)))
+                     (lambda () #t))))
           (dynamic-wind
             (lambda () #t)
-            (lambda () (repl runtime tracer watch?))
+            (lambda () (repl runtime tracer watch? session checkpoint!))
             (lambda ()
               (stop-watcher!)
-              (trace-close! tracer))))))))
+              (trace-close! tracer)
+              (when session (close-session! session))))))))))
 
 (main (cdr (command-line)))

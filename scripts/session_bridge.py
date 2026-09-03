@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free MCP bridge for a Codex-managed live harness session."""
+"""Dependency-free MCP bridge for Codex-managed live harness sessions."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from typing import Any
 PROMPT = "live-agent> "
 APPROVAL_PROMPT = "Approve this command? [y/N] "
 MAX_TRANSCRIPT_CHARS = 2 * 1024 * 1024
+SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
 
 
 def object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -31,18 +32,44 @@ def object_schema(properties: dict[str, Any], required: list[str] | None = None)
     }
 
 
+SESSION_PROPERTY = {
+    "type": "string",
+    "description": "Durable session name. Defaults to 'default'.",
+    "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$",
+}
+
+
+def session_schema(
+    properties: dict[str, Any], required: list[str] | None = None
+) -> dict[str, Any]:
+    return object_schema({"session": SESSION_PROPERTY, **properties}, required)
+
+
 TOOLS = [
     {
+        "name": "live_sessions_list",
+        "description": "List durable and currently running Lisp agent sessions.",
+        "inputSchema": object_schema({}),
+        "annotations": {"readOnlyHint": True},
+    },
+    {
         "name": "live_session_start",
-        "description": "Start the MCP-owned live Lisp agent session, or return the running session.",
-        "inputSchema": object_schema(
-            {"agent": {"type": "string", "description": "Optional project-relative agent image path."}}
+        "description": "Start or resume one named MCP-owned live Lisp agent session.",
+        "inputSchema": session_schema(
+            {
+                "agent": {"type": "string", "description": "Optional project-relative agent image path."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "new", "resume"],
+                    "description": "Auto resumes or creates; new and resume are strict.",
+                },
+            }
         ),
     },
     {
         "name": "live_session_status",
         "description": "Read whether the live session is running and its transcript cursor.",
-        "inputSchema": object_schema({}),
+        "inputSchema": session_schema({}),
         "annotations": {"readOnlyHint": True},
     },
     {
@@ -51,7 +78,7 @@ TOOLS = [
             "Send a user prompt to the live session and return streamed output through the next "
             "agent prompt or shell-approval boundary."
         ),
-        "inputSchema": object_schema(
+        "inputSchema": session_schema(
             {
                 "text": {"type": "string"},
                 "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
@@ -62,7 +89,7 @@ TOOLS = [
     {
         "name": "live_session_read",
         "description": "Read transcript output at or after an optional absolute cursor.",
-        "inputSchema": object_schema(
+        "inputSchema": session_schema(
             {"cursor": {"type": "integer", "minimum": 0}}
         ),
         "annotations": {"readOnlyHint": True},
@@ -70,7 +97,7 @@ TOOLS = [
     {
         "name": "live_session_approve",
         "description": "Answer the current shell request with one y or N keystroke.",
-        "inputSchema": object_schema(
+        "inputSchema": session_schema(
             {
                 "approved": {"type": "boolean"},
                 "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
@@ -81,7 +108,7 @@ TOOLS = [
     {
         "name": "live_session_set",
         "description": "Change a live session setting by creating a transactional generation.",
-        "inputSchema": object_schema(
+        "inputSchema": session_schema(
             {
                 "name": {"type": "string", "enum": ["thinking", "stream"]},
                 "value": {"type": "string"},
@@ -92,21 +119,21 @@ TOOLS = [
     {
         "name": "live_session_add_prompt",
         "description": "Append text to the live system prompt transactionally for later turns.",
-        "inputSchema": object_schema(
+        "inputSchema": session_schema(
             {"text": {"type": "string"}}, ["text"]
         ),
     },
     {
         "name": "live_session_eval",
         "description": "Apply a restricted Scheme live expression to the managed session.",
-        "inputSchema": object_schema(
+        "inputSchema": session_schema(
             {"expression": {"type": "string"}}, ["expression"]
         ),
     },
     {
         "name": "live_extension",
         "description": "List, create, load, disable, or export persistent live extension artifacts.",
-        "inputSchema": object_schema(
+        "inputSchema": session_schema(
             {
                 "action": {
                     "type": "string",
@@ -121,15 +148,19 @@ TOOLS = [
     {
         "name": "live_session_stop",
         "description": "Stop the MCP-owned live session.",
-        "inputSchema": object_schema({}),
+        "inputSchema": session_schema({}),
     },
 ]
 
 
 class LiveSession:
-    def __init__(self, project_root: Path, state_dir: Path) -> None:
+    def __init__(self, project_root: Path, state_root: Path, name: str = "default") -> None:
+        if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
+            raise ValueError("session names must match [A-Za-z0-9][A-Za-z0-9._-]*")
         self.project_root = project_root.resolve()
-        self.state_dir = state_dir.resolve()
+        self.state_root = state_root.resolve()
+        self.name = name
+        self.state_dir = self.state_root / "sessions" / name
         self.process: subprocess.Popen[bytes] | None = None
         self.master_fd: int | None = None
         self._base_cursor = 0
@@ -217,11 +248,18 @@ class LiveSession:
         with self._condition:
             return self._clean(self._transcript).endswith(APPROVAL_PROMPT)
 
-    def start(self, agent: str | None = None) -> dict[str, Any]:
+    def start(self, agent: str | None = None, mode: str = "auto") -> dict[str, Any]:
         if self._running():
             return {**self.status(), "state": "ready", "output": "Session already running."}
+        if mode not in {"auto", "new", "resume"}:
+            raise ValueError("mode must be auto, new, or resume")
         image = self._resolve_agent(agent)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_exists = (self.state_dir / "session.json").is_file()
+        if mode == "new" and checkpoint_exists:
+            raise ValueError(f"session already exists: {self.name}")
+        if mode == "resume" and not checkpoint_exists:
+            raise ValueError(f"session does not exist: {self.name}")
+        self.state_root.mkdir(parents=True, exist_ok=True)
         marker = self._cursor()
         master_fd, slave_fd = pty.openpty()
         terminal_attributes = termios.tcgetattr(slave_fd)
@@ -234,7 +272,9 @@ class LiveSession:
             "--agent",
             str(image),
             "--state-dir",
-            str(self.state_dir),
+            str(self.state_root),
+            {"auto": "--session", "new": "--new-session", "resume": "--resume"}[mode],
+            self.name,
         ]
         try:
             process = subprocess.Popen(
@@ -256,12 +296,26 @@ class LiveSession:
         return result
 
     def status(self) -> dict[str, Any]:
-        return {
+        result = {
+            "session": self.name,
             "running": self._running(),
             "pid": self.process.pid if self._running() and self.process else None,
             "cursor": self._cursor(),
             "state_dir": str(self.state_dir),
+            "resumable": (self.state_dir / "session.json").is_file(),
         }
+        try:
+            checkpoint = json.loads((self.state_dir / "session.json").read_text())
+            result.update(
+                {
+                    "session_id": checkpoint.get("id"),
+                    "generation": checkpoint.get("generation_id"),
+                    "next_turn": checkpoint.get("next_turn"),
+                }
+            )
+        except (OSError, ValueError):
+            pass
+        return result
 
     def send(self, text: str, timeout_seconds: float = 180) -> dict[str, Any]:
         if not isinstance(text, str) or not text.strip():
@@ -331,28 +385,66 @@ def scheme_string(value: str) -> str:
 
 
 class McpServer:
-    def __init__(self, session: LiveSession) -> None:
-        self.session = session
+    def __init__(self, project_root: Path, state_root: Path, session_factory=LiveSession) -> None:
+        self.project_root = project_root.resolve()
+        self.state_root = state_root.resolve()
+        self.session_factory = session_factory
+        self.sessions: dict[str, LiveSession] = {}
 
-    def _run_command(self, command: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _session_name(arguments: dict[str, Any]) -> str:
+        name = arguments.get("session", "default")
+        if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
+            raise ValueError("session names must match [A-Za-z0-9][A-Za-z0-9._-]*")
+        return name
+
+    def _session(self, arguments: dict[str, Any]) -> LiveSession:
+        name = self._session_name(arguments)
+        if name not in self.sessions:
+            self.sessions[name] = self.session_factory(
+                self.project_root, self.state_root, name
+            )
+        return self.sessions[name]
+
+    def _list_sessions(self) -> dict[str, Any]:
+        names = set(self.sessions)
+        root = self.state_root / "sessions"
+        if root.is_dir():
+            names.update(
+                path.parent.name
+                for path in root.glob("*/session.json")
+                if SAFE_NAME.fullmatch(path.parent.name)
+            )
+        return {
+            "sessions": [self._session({"session": name}).status() for name in sorted(names)]
+        }
+
+    def _run_command(
+        self, session: LiveSession, command: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
         timeout = float(arguments.get("timeout_seconds", 180))
-        return self.session.send(command, timeout)
+        return session.send(command, timeout)
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == "live_sessions_list":
+            result = self._list_sessions()
+            return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+        session = self._session(arguments)
         if name == "live_session_start":
-            result = self.session.start(arguments.get("agent"))
+            result = session.start(arguments.get("agent"), arguments.get("mode", "auto"))
         elif name == "live_session_status":
-            result = self.session.status()
+            result = session.status()
         elif name == "live_session_send":
-            result = self.session.send(
+            result = session.send(
                 arguments.get("text"), float(arguments.get("timeout_seconds", 180))
             )
         elif name == "live_session_read":
-            result = self.session.read(arguments.get("cursor"))
+            result = session.read(arguments.get("cursor"))
         elif name == "live_session_approve":
             if not isinstance(arguments.get("approved"), bool):
                 raise ValueError("approved must be a boolean")
-            result = self.session.approve(
+            result = session.approve(
                 arguments["approved"],
                 float(arguments.get("timeout_seconds", 180)),
             )
@@ -360,9 +452,9 @@ class McpServer:
             setting = arguments.get("name")
             value = arguments.get("value")
             if setting == "thinking" and value in {"off", "on", "low", "medium", "high"}:
-                result = self._run_command(f"/thinking {value}", arguments)
+                result = self._run_command(session, f"/thinking {value}", arguments)
             elif setting == "stream" and value in {"off", "on"}:
-                result = self._run_command(f"/stream {value}", arguments)
+                result = self._run_command(session, f"/stream {value}", arguments)
             else:
                 raise ValueError("unsupported setting value")
         elif name == "live_session_add_prompt":
@@ -374,12 +466,12 @@ class McpServer:
                 + scheme_string("\n\n" + text)
                 + "))"
             )
-            result = self._run_command(f"/eval {expression}", arguments)
+            result = self._run_command(session, f"/eval {expression}", arguments)
         elif name == "live_session_eval":
             expression = arguments.get("expression")
             if not isinstance(expression, str) or not expression.strip():
                 raise ValueError("expression must be a non-empty string")
-            result = self._run_command(f"/eval {expression}", arguments)
+            result = self._run_command(session, f"/eval {expression}", arguments)
         elif name == "live_extension":
             action = arguments.get("action")
             extension_name = arguments.get("name")
@@ -399,12 +491,16 @@ class McpServer:
                     command = f"/extension-{action} {extension_name}"
                 else:
                     raise ValueError("unsupported extension action")
-            result = self._run_command(command, arguments)
+            result = self._run_command(session, command, arguments)
         elif name == "live_session_stop":
-            result = self.session.stop()
+            result = session.stop()
         else:
             raise ValueError(f"unknown tool: {name}")
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+    def close(self) -> None:
+        for session in self.sessions.values():
+            session.stop()
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
         method = request.get("method")
@@ -447,9 +543,8 @@ def main() -> int:
     parser.add_argument("--state-dir")
     options = parser.parse_args()
     project_root = Path(__file__).resolve().parents[1]
-    state_dir = Path(options.state_dir) if options.state_dir else project_root / ".lisp-agent/codex-session"
-    session = LiveSession(project_root, state_dir)
-    server = McpServer(session)
+    state_dir = Path(options.state_dir) if options.state_dir else project_root / ".lisp-agent"
+    server = McpServer(project_root, state_dir)
     try:
         for line in sys.stdin:
             if not line.strip():
@@ -468,7 +563,7 @@ def main() -> int:
             if response is not None:
                 print(json.dumps(response, separators=(",", ":")), flush=True)
     finally:
-        session.stop()
+        server.close()
     return 0
 
 

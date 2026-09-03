@@ -34,7 +34,9 @@ than mutating the stable runtime in place:
 4. Stop routing new turns to the old process while allowing pinned turns to
    finish.
 5. Transfer durable references—session ID, transcript cursor, enabled extension
-   names, and trace lineage—not live Guile objects or hidden model state.
+   names, active patch source, checkpoint version, and trace lineage—not live
+   Guile objects or hidden model state. The current named-session checkpoint is
+   the development-scale version of this handoff contract.
 6. Atomically switch the endpoint to the candidate and record the release ID on
    every later trace.
 7. Keep the previous process and artifact available for bounded rollback.

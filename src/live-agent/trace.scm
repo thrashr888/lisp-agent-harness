@@ -9,6 +9,7 @@
             make-tracer
             tracer-path
             tracer-session-id
+            tracer-session-name
             trace-start!
             trace-end!
             trace-span-id
@@ -16,10 +17,11 @@
             trace-close!))
 
 (define-record-type <tracer>
-  (%make-tracer path session-id bridge)
+  (%make-tracer path session-id session-name bridge)
   tracer?
   (path tracer-path)
   (session-id tracer-session-id)
+  (session-name tracer-session-name)
   (bridge tracer-bridge set-tracer-bridge!))
 
 (define-record-type <trace-span>
@@ -93,9 +95,12 @@
 (define* (make-tracer state-directory
                       #:optional
                       (endpoint (or (getenv "LISP_AGENT_OTEL_ENDPOINT")
-                                    (getenv "PHOENIX_COLLECTOR_ENDPOINT"))))
+                                    (getenv "PHOENIX_COLLECTOR_ENDPOINT")))
+                      (session-id #f)
+                      (session-name #f))
   (let ((path (string-append state-directory "/traces.jsonl")))
-    (%make-tracer path (fresh-hex 32) (open-otel-bridge endpoint))))
+    (%make-tracer path (or session-id (fresh-hex 32)) session-name
+                  (open-otel-bridge endpoint))))
 
 (define* (trace-start! tracer name kind attributes #:optional parent)
   (%make-trace-span
@@ -110,6 +115,9 @@
    (append
     `((openinference.span.kind . ,kind)
       (session.id . ,(tracer-session-id tracer)))
+    (if (tracer-session-name tracer)
+        `((session.name . ,(tracer-session-name tracer)))
+        '())
     attributes)
    #f))
 

@@ -33,4 +33,19 @@
   (json-object-ref child-json "parent_span_id"))
 
 (trace-close! tracer)
+
+(define named-tracer (make-tracer test-root #f "stable-session-id" "dogfood"))
+(define named-span
+  (trace-start! named-tracer "agent.turn" "AGENT" '()))
+(trace-end! named-span)
+(define named-json (json-read (car (trace-tail named-tracer 1))))
+(define named-attributes (json-object-ref named-json "attributes"))
+(test-equal "a resumed session keeps its trace identity"
+  "stable-session-id"
+  (json-object-ref named-attributes "session.id"))
+(test-equal "traces carry the human session name"
+  "dogfood"
+  (json-object-ref named-attributes "session.name"))
+(trace-close! named-tracer)
+
 (test-end "trace")
