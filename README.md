@@ -26,8 +26,8 @@ Boot is deliberately compact:
 lisp-agent λ
   default · generation 1 · 0123456789ab
   qwen3.8:27b-mlx via ollama
-  stream on · thinking off · 7 tools · shell ask
-  /help for commands
+  stream on · thinking off · watch on
+  7 tools · shell ask · /help for commands
 ```
 
 At the prompt:
@@ -50,8 +50,13 @@ live-agent> hello
 ...response using the restored prompt...
 ```
 
-Edit `agent/default.scm` and enter `/reload` to load the file as another atomic
-generation. `/reload-clean` intentionally drops session patches.
+Edit `agent/default.scm` while the process is running and the validated file is
+automatically activated as another atomic generation. Existing live patches are
+retained, and a turn already in flight remains pinned to the generation that
+started it. An invalid or incomplete save is rejected once, leaves the working
+generation active, and is retried after the file changes again. `/reload` is
+still available explicitly; `/reload-clean` intentionally drops session patches.
+Pass `--no-watch` to disable automatic source watching.
 
 The agent has the same constrained mechanism as the user. For example, ask:
 
@@ -190,9 +195,15 @@ sees the real streaming output and approval boundaries rather than a parallel
 mock implementation. A prompt call returns at either the next `live-agent>`
 prompt or a shell approval; Codex must then call the separate approval tool with
 an explicit boolean. That tool is approval-gated in the Codex project config and
-refuses input unless a shell request is actually pending. The bridge process owns this session, and all activity
-continues to use the normal journal and trace paths under
-`.lisp-agent/codex-session`.
+refuses input unless a shell request is actually pending. The bridge process
+owns this session, and all activity continues to use the normal journal and
+trace paths under `.lisp-agent/codex-session`.
+
+Because source watching is enabled by default, Codex can edit the live agent
+image with its normal project tools and observe the running process activate
+that save. This applies to the live image, not authority-bearing stable runtime
+modules. See `docs/live-updates.md` for the boundary and a production release
+path.
 
 Run the MCP server directly for protocol debugging with:
 
@@ -263,8 +274,9 @@ The live image provides:
 - Context selection, user-input transformation, and demo behavior
 - Shell policy within the authority ceiling
 
-Each request stays pinned to the generation that began it. New code activates
-only between requests. Failed evaluations leave the active generation intact.
+Each request stays pinned to the generation that began it. New code can activate
+while a request is running without changing that request's pinned generation.
+Failed evaluations and invalid watched saves leave the active generation intact.
 
 ## Layout
 

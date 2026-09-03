@@ -25,6 +25,14 @@
 (define source-path (string-append test-root "/agent.scm"))
 (define state-path (string-append test-root "/state"))
 
+(define (replace-once text old new)
+  (let ((index (string-contains text old)))
+    (unless index (error "test fixture text not found" old))
+    (string-append
+     (substring text 0 index)
+     new
+     (substring text (+ index (string-length old))))))
+
 (system* "mkdir" "-p" test-root)
 (call-with-output-file source-path
   (lambda (port) (display fixture-source port)))
@@ -121,5 +129,36 @@
 
 (test-assert "journal exists"
   (file-exists? (runtime-journal-path runtime)))
+
+(call-with-output-file source-path
+  (lambda (port)
+    (display
+     (replace-once fixture-source "old: " "source: ")
+     port)))
+
+(define reloaded (runtime-reload-if-changed! runtime))
+
+(test-equal "changed source activates a fresh generation"
+  6
+  (generation-id reloaded))
+
+(test-equal "source reload retains active live patches"
+  "source: HELLO"
+  (generation-call (runtime-current runtime) 'agent-demo-response "hello"))
+
+(test-eq "unchanged source does not create a generation"
+  #f
+  (runtime-reload-if-changed! runtime))
+
+(call-with-output-file source-path
+  (lambda (port) (display "(define agent-name \"incomplete\")\n" port)))
+
+(test-error "invalid changed source is rejected"
+  #t
+  (runtime-reload-if-changed! runtime))
+
+(test-equal "invalid source leaves the working generation active"
+  "source: HELLO"
+  (generation-call (runtime-current runtime) 'agent-demo-response "hello"))
 
 (test-end "live runtime")

@@ -3,6 +3,7 @@
   #:use-module (ice-9 format)
   #:use-module (ice-9 popen)
   #:use-module (ice-9 readline)
+  #:use-module (ice-9 threads)
   #:use-module (ice-9 textual-ports)
   #:use-module (srfi srfi-1)
   #:use-module (live-agent json)
@@ -15,16 +16,21 @@
   #:export (main))
 
 (define (usage)
-  (display "Usage: lisp-agent [--agent PATH] [--state-dir PATH]\n"))
+  (display
+   "Usage: lisp-agent [--agent PATH] [--state-dir PATH] [--watch|--no-watch]\n"))
 
 (define (parse-arguments args)
-  (let loop ((rest args) (agent #f) (state-dir #f))
+  (let loop ((rest args) (agent #f) (state-dir #f) (watch? #t))
     (cond
-     ((null? rest) (values agent state-dir))
+     ((null? rest) (values agent state-dir watch?))
      ((and (pair? (cdr rest)) (string=? (car rest) "--agent"))
-      (loop (cddr rest) (cadr rest) state-dir))
+      (loop (cddr rest) (cadr rest) state-dir watch?))
      ((and (pair? (cdr rest)) (string=? (car rest) "--state-dir"))
-      (loop (cddr rest) agent (cadr rest)))
+      (loop (cddr rest) agent (cadr rest) watch?))
+     ((string=? (car rest) "--watch")
+      (loop (cdr rest) agent state-dir #t))
+     ((string=? (car rest) "--no-watch")
+      (loop (cdr rest) agent state-dir #f))
      ((member (car rest) '("-h" "--help"))
       (usage)
       (exit 0))
@@ -79,10 +85,10 @@
 (define (enabled-label value)
   (if value "on" "off"))
 
-(define (show-banner runtime)
+(define (show-banner runtime watch?)
   (let ((generation (runtime-current runtime)))
     (format #t
-            "~%lisp-agent λ~%  ~a · generation ~a · ~a~%  ~a via ~a~%  stream ~a · thinking ~a · ~a tools · shell ~a~%  /help for commands~%~%"
+            "~%lisp-agent λ~%  ~a · generation ~a · ~a~%  ~a via ~a~%  stream ~a · thinking ~a · watch ~a~%  ~a tools · shell ~a · /help for commands~%~%"
             (generation-ref generation 'agent-name)
             (generation-id generation)
             (short-fingerprint (generation-fingerprint generation))
@@ -91,6 +97,7 @@
             (enabled-label (generation-ref generation 'agent-stream?))
             (let ((thinking (generation-ref generation 'agent-thinking)))
               (if (boolean? thinking) (enabled-label thinking) thinking))
+            (enabled-label watch?)
             (length (generation-ref generation 'agent-tools))
             (generation-ref generation 'agent-shell-policy))))
 
@@ -101,6 +108,60 @@
              (append (list #f (exception-message exception))
                      (exception-irritants exception))))
     (lambda _ (format #f "~s" exception))))
+
+(define (start-agent-watcher! runtime)
+  (let ((stopped? #f)
+        (last-attempt #f))
+    (define (notice-reloaded generation)
+      (format #t "~%\u21bb agent image reloaded · generation ~a · ~a~%"
+              (generation-id generation)
+              (short-fingerprint (generation-fingerprint generation)))
+      (force-output))
+    (define (notice-rejected detail)
+      (runtime-record!
+       runtime 'generation-reload-rejected
+       `((generation . ,(generation-id (runtime-current runtime)))
+         (error . ,detail)))
+      (format (current-error-port)
+              "~%\u21bb agent image change rejected · generation ~a remains active~%  ~a~%"
+              (generation-id (runtime-current runtime))
+              detail)
+      (force-output (current-error-port)))
+    (define (check-once!)
+      (catch #t
+        (lambda ()
+          (let* ((current (runtime-current runtime))
+                 (source-path (generation-source-path current))
+                 (source-text (read-source-file source-path)))
+            (cond
+             ((string=? source-text (generation-source-text current))
+              (set! last-attempt #f))
+             ((and last-attempt (string=? source-text last-attempt)) #f)
+             (else
+              ;; Remember rejected content too, so an editor's incomplete save
+              ;; does not cause a retry storm. A later distinct save retries.
+              (set! last-attempt source-text)
+              (catch #t
+                (lambda ()
+                  (let ((generation (runtime-reload-if-changed! runtime)))
+                    (when generation (notice-reloaded generation))))
+                (lambda (key . arguments)
+                  (notice-rejected (format #f "~s: ~s" key arguments))))))))
+        ;; Atomic editor renames can briefly make the source unreadable. Treat
+        ;; that as a wake-up miss and retry, not as a rejected generation.
+        (lambda _ #f)))
+    (let ((thread
+           (call-with-new-thread
+            (lambda ()
+              (let loop ()
+                (unless stopped?
+                  (usleep 250000)
+                  (unless stopped?
+                    (check-once!)
+                    (loop))))))))
+      (lambda ()
+        (set! stopped? #t)
+        (join-thread thread)))))
 
 (define (show-generations runtime)
   (for-each
@@ -872,8 +933,8 @@
           (list 'ok (car new-history))))
       #:unwind? #t)))
 
-(define (repl runtime tracer)
-  (show-banner runtime)
+(define (repl runtime tracer watch?)
+  (show-banner runtime watch?)
   (force-output)
   (let loop ((turn-count 1) (history '()))
     (let ((line (read-user-line "live-agent> ")))
@@ -896,7 +957,7 @@
 (define (main args)
   (call-with-values
       (lambda () (parse-arguments args))
-    (lambda (agent-path state-directory)
+    (lambda (agent-path state-directory watch?)
       (unless (and agent-path state-directory)
         (usage)
         (exit 2))
@@ -906,9 +967,15 @@
               (lambda () (make-runtime agent-path state-directory))))
              (tracer (and runtime (make-tracer state-directory))))
         (unless runtime (exit 1))
-        (dynamic-wind
-          (lambda () #t)
-          (lambda () (repl runtime tracer))
-          (lambda () (trace-close! tracer)))))))
+        (let ((stop-watcher!
+               (if watch?
+                   (start-agent-watcher! runtime)
+                   (lambda () #t))))
+          (dynamic-wind
+            (lambda () #t)
+            (lambda () (repl runtime tracer watch?))
+            (lambda ()
+              (stop-watcher!)
+              (trace-close! tracer))))))))
 
 (main (cdr (command-line)))

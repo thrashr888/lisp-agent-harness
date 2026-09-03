@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from session_bridge import McpServer  # noqa: E402
+from session_bridge import LiveSession, McpServer  # noqa: E402
 
 
 class FakeOllamaHandler(BaseHTTPRequestHandler):
@@ -216,6 +217,61 @@ class ExtensionToolMappingTest(unittest.TestCase):
                 "/extension-export snapshot",
             ],
         )
+
+
+class HotReloadTest(unittest.TestCase):
+    def test_running_process_activates_valid_saves_and_rejects_invalid_ones(self):
+        project_root = Path(tempfile.mkdtemp(prefix="lisp-agent-watch-test-"))
+        session = None
+        try:
+            (project_root / "bin").mkdir()
+            (project_root / "agent").mkdir()
+            (project_root / "extensions").mkdir()
+            (project_root / "src").symlink_to(ROOT / "src", target_is_directory=True)
+            shutil.copy2(ROOT / "bin/lisp-agent", project_root / "bin/lisp-agent")
+            agent_path = project_root / "agent/default.scm"
+            source = (ROOT / "test/session-agent.scm").read_text()
+            agent_path.write_text(source)
+
+            session = LiveSession(project_root, project_root / ".lisp-agent")
+            started = session.start()
+            self.assertEqual(started["state"], "ready")
+            cursor = started["cursor"]
+
+            updated = source.replace("[mcp-test] ", "[hot-reloaded] ")
+            agent_path.write_text(updated)
+            valid_notice = self.wait_for_text(session, cursor, "agent image reloaded")
+            self.assertIn("generation 2", valid_notice)
+
+            response = session.send("hello", 5)
+            self.assertIn("[hot-reloaded] hello", response["output"])
+
+            cursor = response["cursor"]
+            invalid = updated.replace("(define agent-name", "(define missing-agent-name")
+            agent_path.write_text(invalid)
+            rejected_notice = self.wait_for_text(session, cursor, "change rejected")
+            self.assertIn("generation 2 remains active", rejected_notice)
+            time.sleep(0.6)
+            self.assertEqual(
+                session.read(cursor)["output"].count("change rejected"), 1
+            )
+
+            response = session.send("still there", 5)
+            self.assertIn("[hot-reloaded] still there", response["output"])
+        finally:
+            if session is not None:
+                session.stop()
+            shutil.rmtree(project_root, ignore_errors=True)
+
+    @staticmethod
+    def wait_for_text(session, cursor, expected):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            output = session.read(cursor)["output"]
+            if expected in output:
+                return output
+            time.sleep(0.05)
+        raise AssertionError(f"timed out waiting for {expected!r}; output={output!r}")
 
 
 if __name__ == "__main__":
