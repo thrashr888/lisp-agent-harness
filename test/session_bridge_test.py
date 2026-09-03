@@ -189,13 +189,20 @@ class McpBridgeTest(unittest.TestCase):
     def test_named_sessions_run_independently_and_resume(self):
         alpha = self.call(
             "live_session_start",
-            {"session": "alpha", "mode": "new", "agent": "test/session-agent.scm"},
+            {
+                "session": "alpha",
+                "mode": "new",
+                "agent": "test/session-agent.scm",
+                "prompt": "alpha opening",
+            },
         )
         beta = self.call(
             "live_session_start",
             {"session": "beta", "mode": "new", "agent": "test/session-agent.scm"},
         )
         self.assertNotEqual(alpha["pid"], beta["pid"])
+        self.assertIn("[mcp-test] alpha opening", alpha["output"])
+        self.assertEqual(alpha["next_turn"], 2)
 
         self.assertIn(
             "[mcp-test] alpha message",
@@ -225,9 +232,9 @@ class McpBridgeTest(unittest.TestCase):
             "live_session_start",
             {"session": "alpha", "mode": "resume", "agent": "test/session-agent.scm"},
         )
-        self.assertIn("session alpha · resumed · turn 2", resumed["output"])
+        self.assertIn("session alpha · resumed · turn 3", resumed["output"])
         self.assertIn("generation 2", resumed["output"])
-        self.assertEqual(resumed["next_turn"], 2)
+        self.assertEqual(resumed["next_turn"], 3)
         self.assertEqual(resumed["generation"], 2)
         self.assertTrue(
             self.call("live_session_status", {"session": "beta"})["running"]

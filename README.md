@@ -18,7 +18,13 @@ installed, tool-capable `qwen3.8:27b-mlx` model at Ollama's native
 ```sh
 make test
 ./bin/lisp-agent
+./bin/lisp-agent "Give me a cookie recipe about Lisp."
 ```
+
+A quoted positional argument is submitted immediately as the first user turn.
+In a terminal the process remains interactive after the answer; with redirected
+stdin it exits naturally at end-of-file. The initial turn uses the same tools,
+streaming, tracing, approvals, and durable checkpoint path as a typed prompt.
 
 Boot is deliberately compact:
 
@@ -65,6 +71,7 @@ process restart:
 
 ```sh
 ./bin/lisp-agent --session dogfood       # resume if present, otherwise create
+./bin/lisp-agent --session recipes "Continue our Lisp cookie recipe."
 ./bin/lisp-agent --new-session spike-2   # fail if the name already exists
 ./bin/lisp-agent --resume dogfood        # fail if it does not exist
 ./bin/lisp-agent --list-sessions

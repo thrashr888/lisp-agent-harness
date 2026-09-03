@@ -44,6 +44,10 @@
    (string-contains (generation-ref generation 'agent-system-prompt)
                     "(use-modules")))
 
+(test-assert "ordinary content requests should not mutate project files"
+  (string-contains (generation-ref generation 'agent-system-prompt)
+                   "answer ordinary content requests in the conversation"))
+
 (test-equal "default context selection is empty"
   '()
   (generation-call generation 'agent-select-context "hello"))

@@ -20,25 +20,29 @@
   (display
    (string-append
     "Usage: lisp-agent [--agent PATH] [--state-dir PATH] [--watch|--no-watch]\n"
-    "                  [--session NAME|--new-session NAME|--resume NAME]\n"
+    "                  [--session NAME|--new-session NAME|--resume NAME] [PROMPT]\n"
     "       lisp-agent --list-sessions [--state-dir PATH]\n")))
 
 (define (parse-arguments args)
   (let loop ((rest args) (agent #f) (state-dir #f) (watch? #t)
-             (session-name #f) (session-mode #f) (list? #f))
+             (session-name #f) (session-mode #f) (list? #f)
+             (initial-prompt #f))
     (cond
      ((null? rest)
-      (values agent state-dir watch? session-name session-mode list?))
+      (values agent state-dir watch? session-name session-mode list?
+              initial-prompt))
      ((and (pair? (cdr rest)) (string=? (car rest) "--agent"))
       (loop (cddr rest) (cadr rest) state-dir watch?
-            session-name session-mode list?))
+            session-name session-mode list? initial-prompt))
      ((and (pair? (cdr rest)) (string=? (car rest) "--state-dir"))
       (loop (cddr rest) agent (cadr rest) watch?
-            session-name session-mode list?))
+            session-name session-mode list? initial-prompt))
      ((string=? (car rest) "--watch")
-      (loop (cdr rest) agent state-dir #t session-name session-mode list?))
+      (loop (cdr rest) agent state-dir #t session-name session-mode list?
+            initial-prompt))
      ((string=? (car rest) "--no-watch")
-      (loop (cdr rest) agent state-dir #f session-name session-mode list?))
+      (loop (cdr rest) agent state-dir #f session-name session-mode list?
+            initial-prompt))
      ((and (pair? (cdr rest))
            (member (car rest) '("--session" "--new-session" "--resume")))
       (when session-name
@@ -50,13 +54,20 @@
         ((string=? (car rest) "--new-session") 'new)
         ((string=? (car rest) "--resume") 'resume)
         (else 'auto))
-       list?))
+       list? initial-prompt))
      ((string=? (car rest) "--list-sessions")
       (loop (cdr rest) agent state-dir watch?
-            session-name session-mode #t))
+            session-name session-mode #t initial-prompt))
      ((member (car rest) '("-h" "--help"))
       (usage)
       (exit 0))
+     ((not (string-prefix? "-" (car rest)))
+      (when initial-prompt
+        (format (current-error-port)
+                "Only one positional startup prompt may be provided; quote prompts containing spaces.\n")
+        (exit 2))
+      (loop (cdr rest) agent state-dir watch?
+            session-name session-mode list? (car rest)))
      (else
       (format (current-error-port) "Unknown argument: ~a~%" (car rest))
       (usage)
@@ -484,7 +495,8 @@
 
 (define live-change-intent-words
   '("fix" "change" "update" "modify" "edit" "remember" "configure"
-    "switch" "enable" "disable" "always" "start" "stop"))
+    "switch" "enable" "disable" "always" "start" "stop" "add"
+    "implement" "create" "write" "refactor" "remove" "rename" "patch"))
 
 (define (explicit-live-change-request? text)
   (let ((lower (string-downcase text)))
@@ -876,13 +888,13 @@
          (api-key (and key-environment (getenv key-environment)))
          (configured-tools
           (map tool-name (generation-ref generation 'agent-tools)))
-         ;; Self-mutation is absent from the provider request unless this user
-         ;; turn contains explicit change intent. This prevents opportunistic
-         ;; "helpful" rewrites when the user only asked a factual question.
+         ;; Mutation tools are absent unless this user turn contains explicit
+         ;; change intent. This prevents opportunistic "helpful" writes when
+         ;; the user only asked for information or content in the response.
          (enabled-tools
           (filter
            (lambda (name)
-             (or (not (string=? name "live_eval"))
+             (or (not (member name '("live_eval" "write" "edit")))
                  (explicit-live-change-request? line)))
            configured-tools))
          (max-rounds
@@ -973,17 +985,28 @@
           (list 'ok (car new-history))))
       #:unwind? #t)))
 
-(define (repl runtime tracer watch? session checkpoint!)
+(define (repl runtime tracer watch? session checkpoint! initial-prompt)
   (show-banner runtime watch? session)
   (force-output)
   (let loop ((turn-count (if session (session-next-turn session) 1))
-             (history (if session (session-history session) '())))
-    (let ((line (read-user-line "live-agent> ")))
+             (history (if session (session-history session) '()))
+             (pending initial-prompt))
+    (if pending
+        (let ((result
+               (perform-turn! runtime tracer history pending turn-count)))
+          (if result
+              (let ((next-turn (+ turn-count 1))
+                    (next-history (cadr result)))
+                (checkpoint! next-history next-turn)
+                (loop next-turn next-history #f))
+              (loop turn-count history #f)))
+        (let ((line (read-user-line "live-agent> ")))
       (cond
        ((eof-object? line)
         (checkpoint! history turn-count)
         (newline))
-       ((string-null? (string-trim-both line)) (loop turn-count history))
+       ((string-null? (string-trim-both line))
+        (loop turn-count history #f))
        ((string-prefix? "/" line)
         (case (handle-command runtime tracer session line)
           ((quit)
@@ -992,23 +1015,24 @@
           ((reset)
            (display "Conversation state cleared.\n")
            (checkpoint! '() 1)
-           (loop 1 '()))
+           (loop 1 '() #f))
           (else
            (checkpoint! history turn-count)
-           (loop turn-count history))))
+           (loop turn-count history #f))))
        (else
         (let ((result (perform-turn! runtime tracer history line turn-count)))
           (if result
               (let ((next-turn (+ turn-count 1))
                     (next-history (cadr result)))
                 (checkpoint! next-history next-turn)
-                (loop next-turn next-history))
-              (loop turn-count history))))))))
+                (loop next-turn next-history #f))
+              (loop turn-count history #f)))))))))
 
 (define (main args)
   (call-with-values
       (lambda () (parse-arguments args))
-    (lambda (agent-path state-directory watch? requested-session-name session-mode list?)
+    (lambda (agent-path state-directory watch? requested-session-name session-mode
+             list? initial-prompt)
       (unless (and agent-path state-directory)
         (usage)
         (exit 2))
@@ -1073,7 +1097,8 @@
                      (lambda () #t))))
           (dynamic-wind
             (lambda () #t)
-            (lambda () (repl runtime tracer watch? session checkpoint!))
+            (lambda ()
+              (repl runtime tracer watch? session checkpoint! initial-prompt))
             (lambda ()
               (stop-watcher!)
               (trace-close! tracer)

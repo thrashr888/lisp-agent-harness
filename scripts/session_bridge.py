@@ -58,6 +58,10 @@ TOOLS = [
         "inputSchema": session_schema(
             {
                 "agent": {"type": "string", "description": "Optional project-relative agent image path."},
+                "prompt": {
+                    "type": "string",
+                    "description": "Optional first user turn to run immediately after startup.",
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["auto", "new", "resume"],
@@ -248,8 +252,19 @@ class LiveSession:
         with self._condition:
             return self._clean(self._transcript).endswith(APPROVAL_PROMPT)
 
-    def start(self, agent: str | None = None, mode: str = "auto") -> dict[str, Any]:
+    def start(
+        self,
+        agent: str | None = None,
+        mode: str = "auto",
+        initial_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        if initial_prompt is not None and (
+            not isinstance(initial_prompt, str) or not initial_prompt.strip()
+        ):
+            raise ValueError("prompt must be a non-empty string")
         if self._running():
+            if initial_prompt is not None:
+                return self.send(initial_prompt)
             return {**self.status(), "state": "ready", "output": "Session already running."}
         if mode not in {"auto", "new", "resume"}:
             raise ValueError("mode must be auto, new, or resume")
@@ -276,6 +291,8 @@ class LiveSession:
             {"auto": "--session", "new": "--new-session", "resume": "--resume"}[mode],
             self.name,
         ]
+        if initial_prompt is not None:
+            command.append(initial_prompt)
         try:
             process = subprocess.Popen(
                 command,
@@ -432,7 +449,11 @@ class McpServer:
 
         session = self._session(arguments)
         if name == "live_session_start":
-            result = session.start(arguments.get("agent"), arguments.get("mode", "auto"))
+            result = session.start(
+                arguments.get("agent"),
+                arguments.get("mode", "auto"),
+                arguments.get("prompt"),
+            )
         elif name == "live_session_status":
             result = session.status()
         elif name == "live_session_send":
