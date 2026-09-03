@@ -37,6 +37,13 @@
   '(read rg write edit shell live_eval extension)
   (generation-ref generation 'agent-tools))
 
+(test-assert "guides import questions toward Guile module forms"
+  (and
+   (string-contains (generation-ref generation 'agent-system-prompt)
+                    "#:use-module")
+   (string-contains (generation-ref generation 'agent-system-prompt)
+                    "(use-modules")))
+
 (test-equal "default context selection is empty"
   '()
   (generation-call generation 'agent-select-context "hello"))

@@ -97,6 +97,8 @@
      (string-append
       "Search project text with ripgrep without invoking a shell. Queries are "
       "literal by default, so punctuation such as Scheme parentheses is safe. "
+      "For Guile module imports, search the literal forms #:use-module and "
+      "(use-modules separately. "
       "Set regex to true only when regular-expression behavior is intentional. "
       "Results are bounded and project-confined.")
      (json-object
