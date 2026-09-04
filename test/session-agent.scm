@@ -5,6 +5,7 @@
 (define agent-api-key-environment #f)
 (define agent-stream? #t)
 (define agent-thinking #f)
+(define agent-keep-alive "10m")
 (define agent-max-tool-rounds 1)
 (define agent-compaction-threshold 12)
 (define agent-compaction-keep-recent 4)

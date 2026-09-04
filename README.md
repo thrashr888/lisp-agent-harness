@@ -98,6 +98,8 @@ least 24 recent messages and a boundary-safe summary. Both values are live
 Scheme settings (`agent-compaction-threshold` and
 `agent-compaction-keep-recent`). `/compact` runs the same traced operation on
 demand. A failed or cancelled summary leaves the original checkpoint intact.
+Compacted turn evidence remains searchable in the session trace with
+`/traces QUERY`; `/trace SPAN_ID` retrieves the full stored span behind a hit.
 
 Ctrl-C cancels an in-flight model call, tool call, or compaction and returns to
 the prompt without adding the interrupted turn to conversation history. Before
@@ -188,7 +190,9 @@ a `read` tool call and incorporating the result.
 Native Ollama output streams by default. Thinking is hidden by default;
 `agent-thinking` may be `#t`, `#f`, or
 the model-specific levels `'low`, `'medium`, and `'high`; `agent-stream?`
-controls streaming. Both have direct live settings:
+controls streaming. `agent-keep-alive` is sent to Ollama as `keep_alive` and
+defaults to `"10m"`, long enough for a normal interactive pause without pinning
+the model indefinitely. These are all live Scheme settings:
 
 ```text
 /thinking
@@ -200,6 +204,7 @@ controls streaming. Both have direct live settings:
 /eval (define agent-model "your-model-id")
 /eval (define agent-thinking 'medium)
 /eval (define agent-stream? #f)
+/eval (define agent-keep-alive "30m")
 ```
 
 For a remote OpenAI-compatible provider, also redefine `agent-base-url` and the
@@ -216,9 +221,11 @@ OpenAI-compatible adapter is currently non-streaming. To exercise live
 generations without any model, set `agent-model` to `"demo"`.
 
 The model can call `read`, `rg`, `write`, `edit`, `shell`, `traces`,
-`live_eval`, and `extension`. The `traces` tool returns a bounded view of only
-the current session's spans, so the agent can verify generations, context
-selection, tool outcomes, compaction, cancellation, and errors itself. File
+`live_eval`, and `extension`. The `traces` tool searches the complete local
+trace file while retaining only a bounded set of current-session hits. Hits are
+compact and carry stable span IDs; an exact `span_id` lookup returns the full
+stored span. This lets the agent follow generation decisions and tool evidence
+from before compaction without reinserting the whole history. File
 operations are canonicalized and restricted to the process
 working directory. `rg` invokes ripgrep directly and treats queries literally
 by default; its explicit `regex: true` mode is for intentional regular
@@ -239,7 +246,7 @@ pulling the config), then Codex can operate multiple named live harness sessions
 through typed tools:
 
 - list, create, resume, inspect, read, prompt, approve, and stop named sessions
-- cancel in-flight work; compact history; inspect traces; and manage recovery
+- cancel in-flight work; compact history; search/fetch traces; and manage recovery
 - set thinking or streaming and apply restricted live Scheme expressions
 - append system-prompt guidance for later turns
 - list, create, load, disable, and export extensions
@@ -280,7 +287,9 @@ IDs, model name, bounded inputs/outputs/thinking, duration, status, and Ollama
 token counts. This is separate from the append-only audit journal at
 `.shift/events.scm-log`.
 
-Enter `/traces` for a quick local summary. For a full trace UI, start the
+Enter `/traces` for a quick local summary, `/traces deployment` to search all
+completed spans in the current session, and `/trace SPAN_ID` to fetch a full
+stored span. For a full trace UI, start the
 official Phoenix container (requires Docker):
 
 ```sh
@@ -302,10 +311,19 @@ when it is absent. `make run-traced` fails fast if local Phoenix is not healthy.
 Set `SHIFT_OTEL_ENDPOINT` or `PHOENIX_COLLECTOR_ENDPOINT` to export to a
 different collector.
 
-The live image also exposes a `traces` tool. It reads the same local JSONL file,
-filters by the stable current-session ID, and returns at most 50 spans. This is
-an inspection surface, not deterministic replay; large inputs and outputs are
-still truncated by the trace writer.
+The live image and Codex bridge expose the same two-stage `traces` retrieval.
+Search scans the complete JSONL file, filters by stable current-session ID, and
+returns at most 50 compact newest-first hits. Exact span lookup returns stored
+attributes. This is an inspection surface, not deterministic replay; individual
+attributes are still truncated by the trace writer.
+
+Ollama prompt-cache behavior is treated as a measurable optimization. The
+system message and persisted history form the request prefix; volatile selected
+context comes after that prefix. Normal and mutation-intent turns are separate
+tool-schema cache cohorts, and a generation change or compaction is an explicit
+cache boundary. LLM spans record the cohort, reusable-prefix size, dynamic
+context size, tool count, token counts, and Ollama load/prompt/generation
+durations. See [durability and prompt-cache strategy](docs/durability-and-prompt-cache.md).
 
 To inspect Phoenix logs or stop the container without deleting its trace volume:
 
@@ -326,7 +344,7 @@ The stable runtime provides:
 - A curated live-language interface without process, filesystem, network,
   dynamic-loading, module-resolution, or `eval` functions
 - Project-confined read, search, atomic write, and exact-edit capabilities
-- Current-session trace inspection as a bounded model tool
+- Complete-session trace search plus bounded exact-span inspection as a model tool
 - Named, non-overwriting Scheme extension artifacts that can be loaded,
   disabled, or exported from active live patches
 - Atomic named-session checkpoints with conversation, active patches,
@@ -339,7 +357,8 @@ The stable runtime provides:
 The live image provides:
 
 - Agent name, model selection, and system prompt
-- Provider, base URL, API-key environment-variable name, streaming, and thinking
+- Provider, base URL, API-key environment-variable name, streaming, thinking,
+  and Ollama model keep-alive
 - Enabled tool names
 - Maximum tool-call rounds
 - Compaction threshold and recent-message retention
@@ -361,6 +380,7 @@ src/live-agent/compaction.scm boundary-safe history reduction
 src/live-agent/recovery.scm   interrupted-tool write-ahead record
 src/live-agent/extensions.scm persistent artifact lifecycle
 src/live-agent/provider.scm   native Ollama and Chat Completions adapters
+src/live-agent/prompt.scm     cache-friendly request assembly and persistence split
 src/live-agent/trace.scm      JSONL spans and optional OTLP bridge
 src/live-agent/tools.scm      stable capability checks
 src/live-agent/json.scm       dependency-free JSON codec

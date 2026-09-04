@@ -28,6 +28,7 @@
     agent-api-key-environment
     agent-stream?
     agent-thinking
+    agent-keep-alive
     agent-max-tool-rounds
     agent-compaction-threshold
     agent-compaction-keep-recent
@@ -184,6 +185,7 @@
          (module-ref module 'agent-api-key-environment))
         (stream? (module-ref module 'agent-stream?))
         (thinking (module-ref module 'agent-thinking))
+        (keep-alive (module-ref module 'agent-keep-alive))
         (tools (module-ref module 'agent-tools)))
     (unless (memq provider '(ollama openai))
       (error "agent-provider must be ollama or openai" provider))
@@ -199,6 +201,11 @@
     (unless (or (boolean? thinking)
                 (memq thinking '(low medium high)))
       (error "agent-thinking must be #t, #f, low, medium, or high" thinking))
+    (unless (or (and (string? keep-alive)
+                     (not (string-null? keep-alive)))
+                (number? keep-alive))
+      (error "agent-keep-alive must be a non-empty duration string or number"
+             keep-alive))
     (unless (and (list? tools)
                  (every (lambda (tool)
                           (memq tool '(read rg write edit shell traces live_eval extension)))

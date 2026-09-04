@@ -3,6 +3,7 @@
   #:use-module (ice-9 ftw)
   #:use-module (ice-9 popen)
   #:use-module (ice-9 textual-ports)
+  #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-9)
   #:use-module (live-agent json)
   #:export (tracer?
@@ -14,6 +15,7 @@
             trace-end!
             trace-span-id
             trace-tail
+            trace-search
             trace-close!))
 
 (define-record-type <tracer>
@@ -188,6 +190,113 @@
                      (if (> (length next) count)
                          (reverse (cdr (reverse next)))
                          next))))))))))
+
+(define (same-filter-value? actual expected)
+  (cond
+   ((not expected) #t)
+   ((and (string? actual) (string? expected))
+    (string-ci=? actual expected))
+   (else (equal? actual expected))))
+
+(define (trace-preview attributes)
+  (let ((value
+         (or (json-object-ref attributes "error.message" #f)
+             (json-object-ref attributes "output.value" #f)
+             (json-object-ref attributes "input.value" #f)
+             (json-object-ref attributes "context.paths" #f))))
+    (if (and (string? value) (> (string-length value) 240))
+        (string-append (substring value 0 240) "…")
+        (or value ""))))
+
+(define (trace-hit span)
+  (let ((attributes (json-object-ref span "attributes" (json-object))))
+    (json-object
+     (cons "trace_id" (json-object-ref span "trace_id" ""))
+     (cons "span_id" (json-object-ref span "span_id" ""))
+     (cons "parent_span_id"
+           (json-object-ref span "parent_span_id" json-null))
+     (cons "name" (json-object-ref span "name" ""))
+     (cons "kind" (json-object-ref span "kind" ""))
+     (cons "status" (json-object-ref span "status" ""))
+     (cons "duration_ms" (json-object-ref span "duration_ms" 0))
+     (cons "start_time_unix_nano"
+           (json-object-ref span "start_time_unix_nano" 0))
+     (cons "generation"
+           (json-object-ref attributes "generation.id" json-null))
+     (cons "turn" (json-object-ref attributes "turn.number" json-null))
+     (cons "preview" (trace-preview attributes)))))
+
+;; Scan the complete append-only trace file while retaining only a bounded set
+;; of newest matches. Search hits are compact and carry stable span IDs; an
+;; exact span-id lookup returns the full stored span for follow-up inspection.
+(define* (trace-search tracer
+                       #:key
+                       (query #f)
+                       (span-id #f)
+                       (name #f)
+                       (kind #f)
+                       (status #f)
+                       (generation #f)
+                       (turn #f)
+                       (errors-only? #f)
+                       (limit 12))
+  (if (not (file-exists? (tracer-path tracer)))
+      (values '() 0 0 0)
+      (let ((needle (and query (string-downcase query)))
+            (session-id (tracer-session-id tracer)))
+        (call-with-input-file
+            (tracer-path tracer)
+          (lambda (port)
+            (let loop ((matches '()) (matched 0) (scanned 0) (malformed 0))
+              (let ((line (get-line port)))
+                (if (eof-object? line)
+                    (values matches matched scanned malformed)
+                    (let ((next-scanned (+ scanned 1)))
+                      (catch #t
+                        (lambda ()
+                          (let* ((span (json-read line))
+                                 (attributes
+                                  (json-object-ref span "attributes"
+                                                   (json-object)))
+                                 (in-session?
+                                  (string=?
+                                   (json-object-ref attributes "session.id" "")
+                                   session-id))
+                                 (matches?
+                                  (and
+                                   in-session?
+                                   (or (not needle)
+                                       (string-contains
+                                        (string-downcase line) needle))
+                                   (same-filter-value?
+                                    (json-object-ref span "span_id" #f) span-id)
+                                   (same-filter-value?
+                                    (json-object-ref span "name" #f) name)
+                                   (same-filter-value?
+                                    (json-object-ref span "kind" #f) kind)
+                                   (same-filter-value?
+                                    (json-object-ref span "status" #f) status)
+                                   (same-filter-value?
+                                    (json-object-ref attributes
+                                                     "generation.id" #f)
+                                    generation)
+                                   (same-filter-value?
+                                    (json-object-ref attributes
+                                                     "turn.number" #f)
+                                    turn)
+                                   (or (not errors-only?)
+                                       (member
+                                        (json-object-ref span "status" "")
+                                        '("ERROR" "CANCELLED"))))))
+                            (if matches?
+                                (let ((next
+                                       (cons (if span-id span (trace-hit span))
+                                             matches)))
+                                  (loop (take next (min limit (length next)))
+                                        (+ matched 1) next-scanned malformed))
+                                (loop matches matched next-scanned malformed))))
+                        (lambda _
+                          (loop matches matched next-scanned (+ malformed 1)))))))))))))
 
 (define (trace-close! tracer)
   (let ((bridge (tracer-bridge tracer)))

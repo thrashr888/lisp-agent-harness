@@ -119,8 +119,25 @@ TOOLS = [
     },
     {
         "name": "live_session_traces",
-        "description": "Show recent trace spans for this session, including generation and errors.",
-        "inputSchema": session_schema({}),
+        "description": (
+            "List recent spans, search the complete durable session trace, or fetch one "
+            "full span by its stable ID."
+        ),
+        "inputSchema": session_schema(
+            {
+                "query": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "description": "Case-insensitive literal search across all session spans.",
+                },
+                "span_id": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "description": "Exact span ID to retrieve with its stored attributes.",
+                },
+            }
+        ),
+        "annotations": {"readOnlyHint": True},
     },
     {
         "name": "live_session_compact",
@@ -536,7 +553,17 @@ class McpServer:
         elif name == "live_session_cancel":
             result = session.cancel(float(arguments.get("timeout_seconds", 15)))
         elif name == "live_session_traces":
-            result = self._run_command(session, "/traces", arguments)
+            query = arguments.get("query")
+            span_id = arguments.get("span_id")
+            if query and span_id:
+                raise ValueError("use either query or span_id, not both")
+            if span_id:
+                command = f"/trace {span_id}"
+            elif query:
+                command = f"/traces {query}"
+            else:
+                command = "/traces"
+            result = self._run_command(session, command, arguments)
         elif name == "live_session_compact":
             result = self._run_command(session, "/compact", arguments)
         elif name == "live_session_recovery":

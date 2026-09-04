@@ -8,6 +8,7 @@
 (define agent-api-key-environment #f)
 (define agent-stream? #t)
 (define agent-thinking #f)
+(define agent-keep-alive "10m")
 (define agent-max-tool-rounds 6)
 (define agent-compaction-threshold 80)
 (define agent-compaction-keep-recent 24)
@@ -24,8 +25,10 @@
    "The prompt binding is exactly "
    "agent-system-prompt; use (set! agent-system-prompt (string-append "
    "agent-system-prompt \" ...\")) to extend it. Never guess starred binding names. "
-   "Prefer read for known files and rg for project search. Use traces to verify your "
-   "own recent tool outcomes, errors, generation changes, and context choices. Use edit for exact changes "
+   "Prefer read for known files and rg for project search. Use traces to search your "
+   "complete durable session history after compaction, verify tool outcomes, errors, "
+   "generation changes, and context choices, then fetch an exact span when details matter. "
+   "Use edit for exact changes "
    "and write for complete new file content. Only use write or edit when the user explicitly "
    "asked to change project files; answer ordinary content requests in the conversation. "
    "Use one most-likely path at a time instead "

@@ -39,6 +39,7 @@ test:
 	GUILE_AUTO_COMPILE=0 guile -L src test/runtime.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/session.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/trace.scm
+	GUILE_AUTO_COMPILE=0 guile -L src test/prompt.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/compaction.scm
 	GUILE_AUTO_COMPILE=0 guile -L src test/recovery.scm
 	python3 test/session_bridge_test.py
@@ -52,6 +53,7 @@ check: test
 	GUILE_AUTO_COMPILE=0 guild compile -L src -o /tmp/live-agent-provider.go src/live-agent/provider.scm
 	GUILE_AUTO_COMPILE=0 guild compile -L src -o /tmp/live-agent-tools.go src/live-agent/tools.scm
 	GUILE_AUTO_COMPILE=0 guild compile -L src -o /tmp/live-agent-trace.go src/live-agent/trace.scm
+	GUILE_AUTO_COMPILE=0 guild compile -L src -o /tmp/live-agent-prompt.go src/live-agent/prompt.scm
 	GUILE_AUTO_COMPILE=0 guild compile -L src -o /tmp/live-agent-compaction.go src/live-agent/compaction.scm
 	GUILE_AUTO_COMPILE=0 guild compile -L src -o /tmp/live-agent-recovery.go src/live-agent/recovery.scm
 	GUILE_AUTO_COMPILE=0 guild compile -L src -o /tmp/live-agent-main.go src/live-agent/main.scm

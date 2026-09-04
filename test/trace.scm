@@ -36,8 +36,11 @@
 
 (define named-tracer (make-tracer test-root #f "stable-session-id" "dogfood"))
 (define named-span
-  (trace-start! named-tracer "agent.turn" "AGENT" '()))
-(trace-end! named-span)
+  (trace-start! named-tracer "agent.turn" "AGENT"
+                '((generation.id . 2)
+                  (turn.number . 17)
+                  (input.value . "remember the old deploy port"))))
+(trace-end! named-span "OK" '((output.value . "Use port 4317 after compaction.")))
 (define named-json (json-read (car (trace-tail named-tracer 1))))
 (define named-attributes (json-object-ref named-json "attributes"))
 (test-equal "a resumed session keeps its trace identity"
@@ -46,6 +49,27 @@
 (test-equal "traces carry the human session name"
   "dogfood"
   (json-object-ref named-attributes "session.name"))
+
+(call-with-values
+    (lambda ()
+      (trace-search named-tracer #:query "PORT 4317" #:limit 5))
+  (lambda (hits matched scanned malformed)
+    (test-equal "search scans durable history case-insensitively" 1 matched)
+    (test-equal "search returns a compact stable span reference"
+      (trace-span-id named-span)
+      (json-object-ref (car hits) "span_id"))
+    (test-equal "search returns the generating turn" 17
+      (json-object-ref (car hits) "turn"))
+    (test-equal "valid trace file has no malformed lines" 0 malformed)))
+
+(call-with-values
+    (lambda ()
+      (trace-search named-tracer #:span-id (trace-span-id named-span) #:limit 1))
+  (lambda (spans matched scanned malformed)
+    (test-equal "exact span lookup returns full stored attributes"
+      "Use port 4317 after compaction."
+      (json-object-ref
+       (json-object-ref (car spans) "attributes") "output.value"))))
 (trace-close! named-tracer)
 
 (test-end "trace")

@@ -44,14 +44,14 @@
 
 (define thinking-off-request
   (make-ollama-request
-   "fixture" (list (make-message "user" "hello")) '() #t #f))
+   "fixture" (list (make-message "user" "hello")) '() #t #f "10m"))
 (test-eq "serializes explicit thinking false"
   #f
   (json-object-ref thinking-off-request "think"))
 
 (define leveled-request
   (make-ollama-request
-   "fixture" (list (make-message "user" "hello")) '() #t 'medium))
+   "fixture" (list (make-message "user" "hello")) '() #t 'medium "10m"))
 (test-equal "serializes model-specific thinking level"
   "medium"
   (json-object-ref leveled-request "think"))
@@ -61,7 +61,11 @@
    "fixture"
    (list (make-message "user" "work"))
    '("read" "rg" "write" "edit" "shell" "traces" "live_eval" "extension")
-   #t #f))
+   #t #f "10m"))
+
+(test-equal "serializes an explicit model residency window"
+  "10m"
+  (json-object-ref coding-tools-request "keep_alive"))
 
 (test-equal "serializes every constrained coding and mutation tool"
   8

@@ -178,8 +178,30 @@
       "Inspect this running session's own completed trace spans. Use this to "
       "verify tool outcomes, errors, generation identity, context selection, "
       "compaction, and cancellation instead of trusting narration. Results "
-      "are session-scoped and bounded.")
+      "are session-scoped and bounded. Search the complete durable trace after "
+      "compaction, then fetch an exact span_id when full stored attributes are needed.")
      (json-object
+      (cons "query"
+            (json-object
+             (cons "type" "string")
+             (cons "maxLength" 256)
+             (cons "description" "Case-insensitive literal search across stored span JSON")))
+      (cons "span_id"
+            (json-object
+             (cons "type" "string")
+             (cons "maxLength" 256)
+             (cons "description" "Exact span ID to retrieve with full stored attributes")))
+      (cons "name" (string-parameter "Exact span name filter, such as agent.turn"))
+      (cons "kind" (string-parameter "Exact OpenInference kind filter"))
+      (cons "status" (string-parameter "Exact status filter"))
+      (cons "generation"
+            (json-object
+             (cons "type" "integer")
+             (cons "minimum" 1)))
+      (cons "turn"
+            (json-object
+             (cons "type" "integer")
+             (cons "minimum" 1)))
       (cons "limit"
             (json-object
              (cons "type" "integer")
@@ -391,7 +413,7 @@
               (cons "arguments" (tool-call-arguments call))))))
     calls)))
 
-(define (make-ollama-request model messages tool-names stream? thinking)
+(define (make-ollama-request model messages tool-names stream? thinking keep-alive)
   (let* ((tool-values (map tool-schema tool-names))
          (fields
           (append
@@ -399,6 +421,7 @@
             (cons "model" model)
             (cons "messages" (apply json-array messages))
             (cons "stream" stream?)
+            (cons "keep_alive" keep-alive)
             (cons "think"
                   (if (symbol? thinking)
                       (symbol->string thinking)
@@ -423,11 +446,12 @@
       (make-completion content thought calls message root))))
 
 (define (provider-complete-ollama model base-url api-key messages tool-names
-                                  stream? thinking on-content on-thinking)
+                                  stream? thinking keep-alive
+                                  on-content on-thinking)
   (let* ((payload
           (json-write
            (make-ollama-request
-            model messages tool-names stream? thinking)))
+            model messages tool-names stream? thinking keep-alive)))
          (endpoint (string-append (without-trailing-slash base-url) "/api/chat")))
     (if stream?
         (let ((content-port (open-output-string))
@@ -498,11 +522,11 @@
      (curl-post-json endpoint api-key payload))))
 
 (define (provider-complete provider model base-url api-key messages tool-names
-                           stream? thinking on-content on-thinking)
+                           stream? thinking keep-alive on-content on-thinking)
   (case provider
     ((ollama)
      (provider-complete-ollama
-      model base-url api-key messages tool-names stream? thinking
+      model base-url api-key messages tool-names stream? thinking keep-alive
       on-content on-thinking))
     ((openai)
      (provider-complete-openai model base-url api-key messages tool-names))

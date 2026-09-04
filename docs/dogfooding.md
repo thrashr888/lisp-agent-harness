@@ -37,8 +37,9 @@ granting the inner model authority to accept its own runtime changes.
 
 - There is no first-class diff, patch-hunk, git-status, diagnostics, or test tool;
   those actions currently fall back to approval-gated shell.
-- Long sessions now compact into a traced summary, but there is no token-budget
-  policy, summary-quality evaluator, or branch/fork model.
+- Long sessions now compact into a traced summary and can search pre-compaction
+  trace evidence, but there is no token-budget policy, summary-quality evaluator,
+  lossless event-sourced trajectory, or branch/fork model.
 - Interrupted tools leave an explicit write-ahead record with manual
   retry/discard. There is no exact mid-process continuation or deterministic
   replay, so a mutating retry may still be ambiguous.

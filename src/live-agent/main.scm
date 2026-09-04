@@ -11,6 +11,7 @@
   #:use-module (live-agent extensions)
   #:use-module (live-agent generation)
   #:use-module (live-agent provider)
+  #:use-module (live-agent prompt)
   #:use-module (live-agent recovery)
   #:use-module (live-agent runtime)
   #:use-module (live-agent session)
@@ -103,7 +104,8 @@
     "  /extension-load NAME         enable an artifact as a generation\n"
     "  /extension-disable NAME      remove its exact active patch\n"
     "  /extension-export NAME       save all active patches as an artifact\n"
-    "  /traces           show recent spans with generation and context choices\n"
+    "  /traces [QUERY]   list recent spans or search all session traces\n"
+    "  /trace SPAN_ID    inspect one full span returned by trace search\n"
     "  /compact          summarize older history and retain recent turns\n"
     "  /recover          inspect an interrupted tool record\n"
     "  /recover retry    explicitly retry the recorded tool call\n"
@@ -116,7 +118,7 @@
 (define (show-generation runtime)
   (let ((generation (runtime-current runtime)))
     (format #t
-            "generation ~a  fingerprint ~a~%agent ~a  provider ~s  model ~a~%endpoint ~a  api-key-env ~s~%stream ~s  thinking ~s~%tools ~s  shell ~s  patches ~a~%compaction threshold ~a  keep recent ~a~%source ~a~%"
+            "generation ~a  fingerprint ~a~%agent ~a  provider ~s  model ~a~%endpoint ~a  api-key-env ~s~%stream ~s  thinking ~s  keep-alive ~s~%tools ~s  shell ~s  patches ~a~%compaction threshold ~a  keep recent ~a~%source ~a~%"
             (generation-id generation)
             (generation-fingerprint generation)
             (generation-ref generation 'agent-name)
@@ -126,6 +128,7 @@
             (generation-ref generation 'agent-api-key-environment)
             (generation-ref generation 'agent-stream?)
             (generation-ref generation 'agent-thinking)
+            (generation-ref generation 'agent-keep-alive)
             (generation-ref generation 'agent-tools)
             (generation-ref generation 'agent-shell-policy)
             (length (generation-patches generation))
@@ -238,101 +241,97 @@
              (cdr (assq 'loaded-at summary))))
    (runtime-generation-summaries runtime)))
 
-(define (trace-preview value)
-  (if (and (string? value) (> (string-length value) 100))
-      (string-append (substring value 0 100) "…")
-      value))
-
-(define (trace-line-in-session? line session-id)
-  (catch #t
-    (lambda ()
-      (let* ((span (json-read line))
-             (attributes (json-object-ref span "attributes")))
-        (string=? (json-object-ref attributes "session.id" "") session-id)))
-    (lambda _ #f)))
-
-(define (show-traces tracer)
+(define* (show-traces tracer #:optional (query #f) (span-id #f))
   (format #t "trace file ~a~%session ~a~%" (tracer-path tracer)
           (tracer-session-id tracer))
-  (let* ((session-id (tracer-session-id tracer))
-         (session-lines
-          (filter
-           (lambda (line) (trace-line-in-session? line session-id))
-           (trace-tail tracer 200)))
-         (lines
-          (if (> (length session-lines) 12)
-              (take-right session-lines 12)
-              session-lines)))
-    (if (null? lines)
-        (display "No completed spans yet.\n")
-        (for-each
-         (lambda (line)
-           (catch #t
-             (lambda ()
-               (let* ((span (json-read line))
-                      (attributes (json-object-ref span "attributes"))
-                      (generation
-                       (json-object-ref attributes "generation.id" "-"))
-                      (paths
-                       (json-object-ref attributes "context.paths" #f))
-                      (output
-                       (and (string=? (json-object-ref span "name") "agent.turn")
-                            (json-object-ref attributes "output.value" #f))))
-                 (format #t "~6,1f ms  gen=~a  ~a  ~a  ~a~a~a~%"
+  (call-with-values
+      (lambda ()
+        (trace-search tracer #:query query #:span-id span-id
+                      #:limit (if span-id 1 12)))
+    (lambda (spans matched scanned malformed)
+      (when query
+        (format #t "query ~s · ~a matches across ~a spans~%"
+                query matched scanned))
+      (when (> malformed 0)
+        (format #t "ignored ~a malformed trace lines~%" malformed))
+      (if (null? spans)
+          (display "No matching completed spans.\n")
+          (for-each
+           (lambda (span)
+             (if span-id
+                 (begin (display (json-write span)) (newline))
+                 (format #t "~6,1f ms  gen=~a turn=~a  ~a  ~a  ~a  span=~a~a~%"
                          (json-object-ref span "duration_ms")
-                         generation
+                         (json-object-ref span "generation" "-")
+                         (json-object-ref span "turn" "-")
                          (json-object-ref span "kind")
                          (json-object-ref span "name")
                          (json-object-ref span "status")
-                         (if paths (format #f "  context=~a" paths) "")
-                         (if output
-                             (format #f "  result=~s" (trace-preview output))
-                             ""))))
-             (lambda _ (display line) (newline))))
-         lines))))
-
-(define (session-trace-values tracer limit errors-only?)
-  (let* ((session-id (tracer-session-id tracer))
-         (values
-          (filter-map
-           (lambda (line)
-             (catch #t
-               (lambda ()
-                 (let* ((span (json-read line))
-                        (attributes (json-object-ref span "attributes"))
-                        (status (json-object-ref span "status" "")))
-                   (and
-                    (string=?
-                     (json-object-ref attributes "session.id" "") session-id)
-                    (or (not errors-only?)
-                        (member status '("ERROR" "CANCELLED")))
-                    span)))
-               (lambda _ #f)))
-           (trace-tail tracer 1000))))
-    (if (> (length values) limit) (take-right values limit) values)))
+                         (json-object-ref span "span_id")
+                         (let ((preview (json-object-ref span "preview" "")))
+                           (if (and (string? preview)
+                                    (not (string-null? preview)))
+                               (format #f "  ~s" preview)
+                               "")))))
+           spans)))))
 
 (define (execute-traces tracer arguments)
   (catch #t
     (lambda ()
-      (let ((limit (json-object-ref arguments "limit" 12))
-            (errors-only? (json-object-ref arguments "errors_only" #f)))
+      (let* ((limit (json-object-ref arguments "limit" 12))
+             (errors-only? (json-object-ref arguments "errors_only" #f))
+             (query (json-object-ref arguments "query" #f))
+             (span-id (json-object-ref arguments "span_id" #f))
+             (name (json-object-ref arguments "name" #f))
+             (kind (json-object-ref arguments "kind" #f))
+             (status (json-object-ref arguments "status" #f))
+             (generation (json-object-ref arguments "generation" #f))
+             (turn (json-object-ref arguments "turn" #f)))
         (unless (and (integer? limit) (>= limit 1) (<= limit 50))
           (error "trace limit must be an integer from 1 through 50" limit))
         (unless (boolean? errors-only?)
           (error "errors_only must be a boolean" errors-only?))
-        (let loop ((spans (session-trace-values tracer limit errors-only?))
-                   (truncated? #f))
-          (let ((encoded
-                 (json-write
-                  (json-object
-                   (cons "session_id" (tracer-session-id tracer))
-                   (cons "trace_file" (tracer-path tracer))
-                   (cons "truncated" truncated?)
-                   (cons "spans" (apply json-array spans))))))
-            (if (or (<= (string-length encoded) (* 64 1024))
-                    (null? spans))
-                (make-tool-result #t encoded)
-                (loop (cdr spans) #t))))))
+        (for-each
+         (lambda (entry)
+           (let ((value (cdr entry)))
+             (unless (or (not value)
+                         (and (string? value)
+                              (not (string-null? (string-trim-both value)))))
+               (error "trace text filters must be non-empty strings" entry))
+             (when (and (string? value) (> (string-length value) 256))
+               (error "trace text filters are limited to 256 characters" (car entry)))))
+         `((query . ,query) (span_id . ,span-id) (name . ,name)
+           (kind . ,kind) (status . ,status)))
+        (unless (or (not generation) (and (integer? generation) (> generation 0)))
+          (error "generation must be a positive integer" generation))
+        (unless (or (not turn) (and (integer? turn) (> turn 0)))
+          (error "turn must be a positive integer" turn))
+        (call-with-values
+            (lambda ()
+              (trace-search
+               tracer #:query query #:span-id span-id #:name name #:kind kind
+               #:status status #:generation generation #:turn turn
+               #:errors-only? errors-only? #:limit (if span-id 1 limit)))
+          (lambda (found matched scanned malformed)
+            (let loop ((spans found) (truncated? #f))
+              (let*
+                  ((response
+                    (json-object
+                     (cons "session_id" (tracer-session-id tracer))
+                     (cons "trace_file" (tracer-path tracer))
+                     (cons "mode"
+                           (if span-id "get" (if query "search" "list")))
+                     (cons "query" (or query json-null))
+                     (cons "matched" matched)
+                     (cons "scanned" scanned)
+                     (cons "malformed" malformed)
+                     (cons "truncated" truncated?)
+                     (cons "spans" (apply json-array spans))))
+                   (encoded (json-write response)))
+                (if (or (<= (string-length encoded) (* 64 1024))
+                        (null? spans))
+                    (make-tool-result #t encoded)
+                    (loop (drop-right spans 1) #t))))))))
     (lambda (key . arguments)
       (make-tool-result
        #f (format #f "trace inspection failed (~a): ~s" key arguments)))))
@@ -495,6 +494,12 @@
    ((string=? line "/generations") (show-generations runtime) 'continue)
    ((string=? line "/extensions") (show-extensions runtime) 'continue)
    ((string=? line "/traces") (show-traces tracer) 'continue)
+   ((string-prefix? "/traces " line)
+    (show-traces tracer (trimmed-command-argument line "/traces "))
+    'continue)
+   ((string-prefix? "/trace " line)
+    (show-traces tracer #f (trimmed-command-argument line "/trace "))
+    'continue)
    ((string=? line "/compact") 'compact)
    ((string=? line "/recover") (show-recovery tracer) 'continue)
    ((string=? line "/recover retry") 'recover-retry)
@@ -984,21 +989,41 @@
           (if (and openai-usage (json-object? openai-usage))
               (json-object-ref openai-usage "completion_tokens" #f)
               (and (json-object? root)
-                   (json-object-ref root "eval_count" #f)))))
+                   (json-object-ref root "eval_count" #f))))
+         (metric
+          (lambda (name)
+            (and (json-object? root) (json-object-ref root name #f)))))
     (append
      (if prompt `((llm.token_count.prompt . ,prompt)) '())
-     (if output `((llm.token_count.completion . ,output)) '()))))
+     (if output `((llm.token_count.completion . ,output)) '())
+     (if (metric "total_duration")
+         `((llm.total_duration_ns . ,(metric "total_duration"))) '())
+     (if (metric "load_duration")
+         `((llm.load_duration_ns . ,(metric "load_duration"))) '())
+     (if (metric "prompt_eval_duration")
+         `((llm.prompt_eval_duration_ns . ,(metric "prompt_eval_duration"))) '())
+     (if (metric "eval_duration")
+         `((llm.eval_duration_ns . ,(metric "eval_duration"))) '()))))
+
+(define (messages-character-count messages)
+  (fold (lambda (message total)
+          (+ total (string-length (json-write message))))
+        0 messages))
 
 (define (complete-with-trace tracer parent generation-id provider model base-url
-                             api-key messages enabled-tools stream? thinking round)
+                             api-key messages enabled-tools stream? thinking
+                             keep-alive round
+                             prompt-attributes)
   (let ((span
          (trace-start!
           tracer (string-append (symbol->string provider) ".chat") "LLM"
-          `((generation.id . ,generation-id)
-            (llm.model_name . ,model)
-            (llm.provider . ,(symbol->string provider))
-            (llm.round . ,round)
-            (input.value . ,(json-write (apply json-array messages))))
+          (append
+           `((generation.id . ,generation-id)
+             (llm.model_name . ,model)
+             (llm.provider . ,(symbol->string provider))
+             (llm.round . ,round)
+             (input.value . ,(json-write (apply json-array messages))))
+           prompt-attributes)
           parent))
         (thinking-started? #f)
         (content-started? #f))
@@ -1020,7 +1045,7 @@
         (let ((completion
                (provider-complete
                 provider model base-url api-key messages enabled-tools
-                stream? thinking on-content on-thinking)))
+                stream? thinking keep-alive on-content on-thinking)))
           (when (or thinking-started? content-started?)
             (newline)
             (force-output))
@@ -1062,6 +1087,7 @@
           (generation-ref generation 'agent-max-tool-rounds))
          (stream? (generation-ref generation 'agent-stream?))
          (thinking (generation-ref generation 'agent-thinking))
+         (keep-alive (generation-ref generation 'agent-keep-alive))
          (system
           (make-message
            "system" (generation-ref generation 'agent-system-prompt)))
@@ -1072,30 +1098,38 @@
            tracer parent generation transformed-line))
          (context-paths (car selected))
          (context-text (cadr selected))
-         (ephemeral-messages
-          (append
-           (list system)
-           (if (null? context-paths)
-               '()
-               (list
-                (make-message
-                 "system"
-                 (string-append
-                  "Authoritative project context selected by agent-select-context "
-                  "for this turn. Prefer it over earlier answers when they conflict.\n\n"
-                  context-text))))))
-         (ephemeral-count (length ephemeral-messages))
+         (context-messages
+          (if (null? context-paths)
+              '()
+              (list
+               (make-message
+                "system"
+                (string-append
+                 "Authoritative project context selected by agent-select-context "
+                 "for this turn. Prefer it over earlier answers when they conflict.\n\n"
+                 context-text)))))
+         (user-message (make-message "user" transformed-line))
+         (cache-prefix (append (list system) history))
+         (prompt-attributes
+          `((prompt.cache.cohort
+             . ,(if (explicit-live-change-request? line) "mutation" "normal"))
+            (prompt.cache.prefix_messages
+             . ,(prompt-cache-prefix-count history))
+            (prompt.cache.prefix_chars
+             . ,(messages-character-count cache-prefix))
+            (prompt.cache.dynamic_context_chars
+             . ,(messages-character-count context-messages))
+            (prompt.cache.tool_count . ,(length enabled-tools))))
          (working
-          (append
-           ephemeral-messages
-           history
-           (list (make-message "user" transformed-line)))))
+          (build-provider-messages
+           system history context-messages user-message)))
     (let loop ((messages working) (round 0))
       (let* ((outcome
               (complete-with-trace
                tracer parent (generation-id generation)
                provider model base-url api-key messages
-               enabled-tools stream? thinking round))
+               enabled-tools stream? thinking keep-alive round
+               prompt-attributes))
              (completion (car outcome))
              (content-streamed? (cdr outcome))
              (calls (completion-tool-calls completion))
@@ -1108,9 +1142,12 @@
                 (unless (string-null? (or (completion-thinking completion) ""))
                   (format #t "thinking> ~a~%" (completion-thinking completion)))
                 (format #t "assistant> ~a~%" reply))
-              ;; Drop this turn's system prompt and selected context. The active
-              ;; generation supplies both afresh for every user turn.
-              (list (list-tail with-assistant ephemeral-count) reply))
+              ;; Drop the runtime-owned system prompt and this turn's selected
+              ;; context while retaining the prior history and new turn tail.
+              (list
+               (persist-provider-turn
+                history (length context-messages) with-assistant)
+               reply))
             (begin
               (when (>= round max-rounds)
                 (error "tool round limit reached" max-rounds))
@@ -1128,6 +1165,7 @@
              (key-environment
               (generation-ref generation 'agent-api-key-environment))
              (api-key (and key-environment (getenv key-environment)))
+             (keep-alive (generation-ref generation 'agent-keep-alive))
              (completion
               (provider-complete
                provider
@@ -1144,7 +1182,7 @@
                   "success without a recorded tool result. Return only the compact summary."))
                 (make-message
                  "user" (json-write (apply json-array prefix))))
-               '() #f #f (lambda _ #t) (lambda _ #t))))
+               '() #f #f keep-alive (lambda _ #t) (lambda _ #t))))
         (let ((summary (or (completion-content completion) "")))
           (when (string-null? (string-trim-both summary))
             (error "compaction model returned an empty summary"))

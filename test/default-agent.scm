@@ -29,6 +29,9 @@
 (test-eq "hides model thinking by default"
   #f
   (generation-ref generation 'agent-thinking))
+(test-equal "keeps the local model warm for an interactive pause"
+  "10m"
+  (generation-ref generation 'agent-keep-alive))
 
 (test-assert "agent can change its constrained live image"
   (memq 'live_eval (generation-ref generation 'agent-tools)))

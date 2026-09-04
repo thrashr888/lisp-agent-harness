@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -221,8 +222,15 @@ class McpBridgeTest(unittest.TestCase):
         self.call("live_session_send", {"text": "third"})
         compacted = self.call("live_session_compact")
         self.assertIn("compacted", compacted["output"])
-        traces = self.call("live_session_traces")
+        traces = self.call("live_session_traces", {"query": "session.compact"})
         self.assertIn("session.compact", traces["output"])
+        self.assertIn("matches across", traces["output"])
+        span_match = re.search(r"span=([0-9a-f]+)", traces["output"])
+        self.assertIsNotNone(span_match)
+        exact_trace = self.call(
+            "live_session_traces", {"span_id": span_match.group(1)}
+        )
+        self.assertIn('"name":"session.compact"', exact_trace["output"])
 
         setting = self.call(
             "live_session_set", {"name": "thinking", "value": "on"}
