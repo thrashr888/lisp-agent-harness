@@ -6,6 +6,8 @@
 (define agent-stream? #t)
 (define agent-thinking #f)
 (define agent-max-tool-rounds 1)
+(define agent-compaction-threshold 12)
+(define agent-compaction-keep-recent 4)
 (define agent-system-prompt "MCP bridge fixture")
 (define agent-tools '(read rg))
 (define agent-shell-policy 'deny)

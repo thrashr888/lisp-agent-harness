@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export SHIFT_PROJECT_ROOT="$project_root"
+# Compatibility for older extensions and trace bridge processes.
+export LISP_AGENT_PROJECT_ROOT="$project_root"
+
+state_root="$project_root/.shift"
+if [ ! -e "$state_root" ] && [ -d "$project_root/.lisp-agent" ]; then
+  state_root="$project_root/.lisp-agent"
+fi
+
+exec guile \
+  --no-auto-compile \
+  -L "$project_root/src" \
+  -s "$project_root/src/live-agent/main.scm" \
+  --agent "$project_root/agent/default.scm" \
+  --state-dir "$state_root" \
+  "$@"

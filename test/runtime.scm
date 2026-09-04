@@ -13,6 +13,8 @@
    "(define agent-stream? #t)\n"
    "(define agent-thinking 'low)\n"
    "(define agent-max-tool-rounds 2)\n"
+   "(define agent-compaction-threshold 12)\n"
+   "(define agent-compaction-keep-recent 4)\n"
    "(define agent-system-prompt \"fixture prompt\")\n"
    "(define agent-tools '(read))\n"
    "(define agent-shell-policy 'deny)\n"
@@ -21,7 +23,7 @@
    "(define (agent-demo-response text) (string-append \"old: \" (agent-transform-user text)))\n"))
 
 (define test-root
-  (string-append "/tmp/lisp-agent-harness-test-" (number->string (getpid))))
+  (string-append "/tmp/shift-test-" (number->string (getpid))))
 (define source-path (string-append test-root "/agent.scm"))
 (define state-path (string-append test-root "/state"))
 

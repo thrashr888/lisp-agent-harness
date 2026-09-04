@@ -12,8 +12,8 @@ save instead of retrying noisily. This makes ordinary editor write patterns and
 temporarily incomplete files safe to iterate on.
 
 ```sh
-./bin/lisp-agent             # watcher enabled
-./bin/lisp-agent --no-watch  # explicit/manual reload only
+./bin/shift             # watcher enabled
+./bin/shift --no-watch  # explicit/manual reload only
 ```
 
 The boundary is intentional: this watches `agent/default.scm` (or the image

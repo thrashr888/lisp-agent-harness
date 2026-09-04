@@ -1,6 +1,6 @@
-# Lisp Agent Harness
+# shift
 
-An executable spike for a tiny agent harness whose behavior is a live Guile
+`shift` is an executable spike for a tiny agent harness whose behavior is a live Guile
 image. The permanent runtime owns authority, provider transport, tool execution,
 and atomic generation switching; the user-owned Scheme image defines the agent.
 
@@ -17,8 +17,8 @@ installed, tool-capable `qwen3.8:27b-mlx` model at Ollama's native
 
 ```sh
 make test
-./bin/lisp-agent
-./bin/lisp-agent "Give me a cookie recipe about Lisp."
+./bin/shift
+./bin/shift "Give me a cookie recipe about Lisp."
 ```
 
 A quoted positional argument is submitted immediately as the first user turn.
@@ -29,30 +29,30 @@ streaming, tracing, approvals, and durable checkpoint path as a typed prompt.
 Boot is deliberately compact:
 
 ```text
-lisp-agent λ
+shift λ
   default · generation 1 · 0123456789ab
   qwen3.8:27b-mlx via ollama
   stream on · thinking off · watch on
-  7 tools · shell ask · /help for commands
+  8 tools · shell ask · /help for commands
 ```
 
 At the prompt:
 
 ```text
-live-agent> hello
+shift> hello
 thinking> ...reasoning streams here...
 assistant> ...answer streams here...
 
-live-agent> /eval (define agent-system-prompt "Reply in uppercase.")
+shift> /eval (define agent-system-prompt "Reply in uppercase.")
 generation 2 ...
 
-live-agent> hello
+shift> hello
 ...response using the patched prompt...
 
-live-agent> /rollback
+shift> /rollback
 generation 1 ...
 
-live-agent> hello
+shift> hello
 ...response using the restored prompt...
 ```
 
@@ -70,14 +70,14 @@ Use a named session when the conversation and live behavior should survive a
 process restart:
 
 ```sh
-./bin/lisp-agent --session dogfood       # resume if present, otherwise create
-./bin/lisp-agent --session recipes "Continue our Lisp cookie recipe."
-./bin/lisp-agent --new-session spike-2   # fail if the name already exists
-./bin/lisp-agent --resume dogfood        # fail if it does not exist
-./bin/lisp-agent --list-sessions
+./bin/shift --session dogfood       # resume if present, otherwise create
+./bin/shift --session recipes "Continue our Lisp cookie recipe."
+./bin/shift --new-session spike-2   # fail if the name already exists
+./bin/shift --resume dogfood        # fail if it does not exist
+./bin/shift --list-sessions
 ```
 
-The checkpoint at `.lisp-agent/sessions/NAME/session.json` is atomically
+The checkpoint at `.shift/sessions/NAME/session.json` is atomically
 rewritten after successful turns and interactive mutations. It stores the
 provider message history, next turn number, active live-patch source, generation
 number, and a stable session ID. Resume rebuilds a fresh Scheme module from the
@@ -93,10 +93,25 @@ messages; large artifacts belong in files with references in the conversation.
 An advisory owner lock prevents two processes from opening and overwriting the
 same named session concurrently; different names remain fully concurrent.
 
+Older history compacts automatically after 80 provider messages, retaining at
+least 24 recent messages and a boundary-safe summary. Both values are live
+Scheme settings (`agent-compaction-threshold` and
+`agent-compaction-keep-recent`). `/compact` runs the same traced operation on
+demand. A failed or cancelled summary leaves the original checkpoint intact.
+
+Ctrl-C cancels an in-flight model call, tool call, or compaction and returns to
+the prompt without adding the interrupted turn to conversation history. Before
+each enabled tool executes, `shift` atomically records its name, arguments, and
+generation. If the process dies or a tool is cancelled, the next boot reports
+the ambiguous call. `/recover` inspects it, `/recover retry` repeats it only
+after an explicit user action, and `/recover discard` clears it without running
+anything. `live_eval` and extension mutations are never replayed because their
+post-crash state must be inspected instead.
+
 The agent has the same constrained mechanism as the user. For example, ask:
 
 ```text
-live-agent> Update your prompt so you remember my name is Paul.
+shift> Update your prompt so you remember my name is Paul.
 ```
 
 It calls `live_eval` with Scheme such as `(set! agent-system-prompt ...)` and
@@ -161,7 +176,7 @@ Start Ollama, confirm the model is installed, and run the harness:
 
 ```sh
 ollama list
-./bin/lisp-agent
+./bin/shift
 ```
 
 The selected default advertises completion, tool calling, thinking, vision, and
@@ -200,8 +215,11 @@ Set the environment variable before launching the process. The generic
 OpenAI-compatible adapter is currently non-streaming. To exercise live
 generations without any model, set `agent-model` to `"demo"`.
 
-The model can call `read`, `rg`, `write`, `edit`, `shell`, `live_eval`, and
-`extension`. File operations are canonicalized and restricted to the process
+The model can call `read`, `rg`, `write`, `edit`, `shell`, `traces`,
+`live_eval`, and `extension`. The `traces` tool returns a bounded view of only
+the current session's spans, so the agent can verify generations, context
+selection, tool outcomes, compaction, cancellation, and errors itself. File
+operations are canonicalized and restricted to the process
 working directory. `rg` invokes ripgrep directly and treats queries literally
 by default; its explicit `regex: true` mode is for intentional regular
 expressions. `write` replaces a complete
@@ -221,19 +239,20 @@ pulling the config), then Codex can operate multiple named live harness sessions
 through typed tools:
 
 - list, create, resume, inspect, read, prompt, approve, and stop named sessions
+- cancel in-flight work; compact history; inspect traces; and manage recovery
 - set thinking or streaming and apply restricted live Scheme expressions
 - append system-prompt guidance for later turns
 - list, create, load, disable, and export extensions
 
 Each name maps to an independent child process and durable checkpoint. The
-bridge launches the same `bin/lisp-agent` under a pseudo-terminal, so it
+bridge launches the same `bin/shift` under a pseudo-terminal, so it
 sees the real streaming output and approval boundaries rather than a parallel
-mock implementation. A prompt call returns at either the next `live-agent>`
+mock implementation. A prompt call returns at either the next `shift>`
 prompt or a shell approval; Codex must then call the separate approval tool with
 an explicit boolean. That tool is approval-gated in the Codex project config and
 refuses input unless a shell request is actually pending. The bridge process
 owns running processes, while restart-safe state, journals, and traces live
-under `.lisp-agent/sessions/NAME`.
+under `.shift/sessions/NAME`.
 
 Because source watching is enabled by default, Codex can edit the live agent
 image with its normal project tools and observe the running process activate
@@ -250,16 +269,16 @@ gates.
 Run the MCP server directly for protocol debugging with:
 
 ```sh
-./bin/lisp-agent-mcp
+./bin/shift-mcp
 ```
 
 ## Traces and Phoenix
 
 Every completed turn writes OpenInference-shaped `AGENT`, `LLM`, and `TOOL`
-spans to `.lisp-agent/traces.jsonl`. They include hierarchy, generation and turn
+spans to `.shift/traces.jsonl`. They include hierarchy, generation and turn
 IDs, model name, bounded inputs/outputs/thinking, duration, status, and Ollama
 token counts. This is separate from the append-only audit journal at
-`.lisp-agent/events.scm-log`.
+`.shift/events.scm-log`.
 
 Enter `/traces` for a quick local summary. For a full trace UI, start the
 official Phoenix container (requires Docker):
@@ -276,12 +295,17 @@ Then launch the harness with OTLP export enabled:
 make run-traced
 ```
 
-Open `http://localhost:6006` and select the `lisp-agent-harness` project. The
+Open `http://localhost:6006` and select the `shift` project. The
 small Python bridge is dependency-isolated by `uv` and sends OTLP/HTTP protobuf
 to Phoenix asynchronously; tracing is still fully functional as local JSONL
 when it is absent. `make run-traced` fails fast if local Phoenix is not healthy.
-Set `LISP_AGENT_OTEL_ENDPOINT` or `PHOENIX_COLLECTOR_ENDPOINT` to export to a
+Set `SHIFT_OTEL_ENDPOINT` or `PHOENIX_COLLECTOR_ENDPOINT` to export to a
 different collector.
+
+The live image also exposes a `traces` tool. It reads the same local JSONL file,
+filters by the stable current-session ID, and returns at most 50 spans. This is
+an inspection surface, not deterministic replay; large inputs and outputs are
+still truncated by the trace writer.
 
 To inspect Phoenix logs or stop the container without deleting its trace volume:
 
@@ -302,10 +326,13 @@ The stable runtime provides:
 - A curated live-language interface without process, filesystem, network,
   dynamic-loading, module-resolution, or `eval` functions
 - Project-confined read, search, atomic write, and exact-edit capabilities
+- Current-session trace inspection as a bounded model tool
 - Named, non-overwriting Scheme extension artifacts that can be loaded,
   disabled, or exported from active live patches
 - Atomic named-session checkpoints with conversation, active patches,
   generation continuity, and stable trace identity
+- Boundary-safe model compaction, in-flight cancellation, and explicit
+  interrupted-tool retry/discard recovery
 - Hard authority validation (`agent-shell-policy` may be `deny` or `ask`, never
   ambient `allow`)
 
@@ -315,6 +342,7 @@ The live image provides:
 - Provider, base URL, API-key environment-variable name, streaming, and thinking
 - Enabled tool names
 - Maximum tool-call rounds
+- Compaction threshold and recent-message retention
 - Context selection, user-input transformation, and demo behavior
 - Shell policy within the authority ceiling
 
@@ -329,6 +357,8 @@ agent/default.scm             live user-owned image
 src/live-agent/generation.scm isolated module generations
 src/live-agent/runtime.scm    transitions, rollback, journal
 src/live-agent/session.scm    durable named-session checkpoints
+src/live-agent/compaction.scm boundary-safe history reduction
+src/live-agent/recovery.scm   interrupted-tool write-ahead record
 src/live-agent/extensions.scm persistent artifact lifecycle
 src/live-agent/provider.scm   native Ollama and Chat Completions adapters
 src/live-agent/trace.scm      JSONL spans and optional OTLP bridge
@@ -336,11 +366,17 @@ src/live-agent/tools.scm      stable capability checks
 src/live-agent/json.scm       dependency-free JSON codec
 src/live-agent/main.scm       interactive shell
 scripts/session_bridge.py     dependency-free MCP-to-live-PTY bridge
-bin/lisp-agent-mcp            project-scoped Codex MCP entry point
+bin/shift                     primary interactive entry point
+bin/shift-mcp                 project-scoped Codex MCP entry point
 .codex/config.toml            local MCP registration for trusted projects
 extensions/README.md          artifact contract
 test/*                        Scheme runtime tests plus MCP integration test
 ```
+
+The internal Guile module namespace remains `(live-agent ...)` for now. The old
+`bin/lisp-agent` and `bin/lisp-agent-mcp` paths are compatibility shims, and a
+pre-existing `.lisp-agent/` directory is used only when `.shift/` does not yet
+exist.
 
 Journal and trace attribute values larger than 4 KiB are truncated. Tool output
 is bounded at 64 KiB, writes at 256 KiB, and edited source files at 512 KiB;
@@ -352,6 +388,13 @@ This spike is testing a narrower idea than Pi. It now has one concrete advantage
 to evaluate—transactional, generation-attributed live behavior—but it lacks most
 of the product surface of a mature coding harness. See `docs/gaps-with-pi.md` for
 the direct comparison and the gaps on both sides.
+
+## Subagent direction
+
+The proposed next step is to fork a validated live generation and a bounded
+session checkpoint into an isolated child, then return trace and extension
+references for selective promotion. See [Fork the live
+image](docs/subagents.md) for the concrete contract and smallest milestone.
 
 ## License
 

@@ -171,6 +171,26 @@
       (cons "expected_behavior"
             (string-parameter "Observable behavior expected on the next user turn")))
      '("expression" "summary" "expected_behavior")))
+   ((string=? name "traces")
+    (function-tool
+     "traces"
+     (string-append
+      "Inspect this running session's own completed trace spans. Use this to "
+      "verify tool outcomes, errors, generation identity, context selection, "
+      "compaction, and cancellation instead of trusting narration. Results "
+      "are session-scoped and bounded.")
+     (json-object
+      (cons "limit"
+            (json-object
+             (cons "type" "integer")
+             (cons "minimum" 1)
+             (cons "maximum" 50)
+             (cons "description" "Most recent spans to return; defaults to 12")))
+      (cons "errors_only"
+            (json-object
+             (cons "type" "boolean")
+             (cons "description" "Only return ERROR or CANCELLED spans"))))
+     '()))
    ((string=? name "extension")
     (function-tool
      "extension"

@@ -17,7 +17,7 @@
 (test-assert "read stays inside project"
   (and (tool-result-success? read-result)
        (string-contains (tool-result-output read-result)
-                        "# Lisp Agent Harness")))
+                    "# shift")))
 
 (define escaped-read
   (execute-tool

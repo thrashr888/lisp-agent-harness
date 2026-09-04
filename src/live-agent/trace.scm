@@ -79,7 +79,8 @@
         attributes)))
 
 (define (open-otel-bridge endpoint)
-  (let* ((root (getenv "LISP_AGENT_PROJECT_ROOT"))
+  (let* ((root (or (getenv "SHIFT_PROJECT_ROOT")
+                   (getenv "LISP_AGENT_PROJECT_ROOT")))
          (script (and root (string-append root "/scripts/otel-bridge.py"))))
     (if (and endpoint script (file-exists? script))
         (begin
@@ -89,12 +90,13 @@
           (open-pipe* OPEN_WRITE
                       "uv" "run" "--quiet" "--script" script
                       "--endpoint" endpoint
-                      "--project" "lisp-agent-harness"))
+                      "--project" "shift"))
         #f)))
 
 (define* (make-tracer state-directory
                       #:optional
-                      (endpoint (or (getenv "LISP_AGENT_OTEL_ENDPOINT")
+                      (endpoint (or (getenv "SHIFT_OTEL_ENDPOINT")
+                                    (getenv "LISP_AGENT_OTEL_ENDPOINT")
                                     (getenv "PHOENIX_COLLECTOR_ENDPOINT")))
                       (session-id #f)
                       (session-name #f))

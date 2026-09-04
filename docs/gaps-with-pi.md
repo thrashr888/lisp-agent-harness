@@ -1,6 +1,6 @@
 # Gaps between this spike and Pi
 
-Snapshot: 2026-09-02. “Pi” means the current Pi coding agent maintained at
+Snapshot: 2026-09-04. “Pi” means the current Pi coding agent maintained at
 [`earendil-works/pi`](https://github.com/earendil-works/pi) (the former
 `badlogic/pi-mono` URL redirects there).
 
@@ -12,13 +12,13 @@ observability. The useful comparison is therefore asymmetric.
 
 | Gap | Why it matters |
 | --- | --- |
-| Coding workflow depth | `read`, `rg`, atomic `write`, and exact `edit` now cover the basic loop, but there is no structured process tool, patch hunks, diagnostics integration, cancellation, or rich diff review. |
-| Session lifecycle depth | Named conversations, active live patches, generation numbers, and trace identity now resume from atomic checkpoints, but sessions cannot yet branch, fork, compact, export, share, or recover an interrupted tool approval. |
+| Coding workflow depth | `read`, `rg`, atomic `write`, exact `edit`, and turn cancellation cover the basic loop, but there is no structured process tool, patch hunks, diagnostics integration, background jobs, or rich diff review. |
+| Session lifecycle depth | Named conversations now resume, compact, cancel, and expose explicit interrupted-tool recovery, but sessions cannot yet branch, fork, export, or share. Recovery repeats a whole tool call; it does not resume inside a process. |
 | Provider breadth | Native Ollama plus a basic non-streaming OpenAI-compatible path is far behind Pi’s provider catalog, authentication, model switching, retries, and multimodal handling. |
 | Terminal product | There is no rich TUI, multiline editor, tool-call renderer, queueing, keybindings, themes, settings UI, or model picker. |
 | Extension ecosystem | Named Scheme artifacts can now be created, listed, loaded, disabled, and exported, but there are no skills, prompt templates, dependencies, package registry, lifecycle/event API, custom UI, signatures, or compatibility metadata. |
 | Embedding modes | There is no print/JSON mode, RPC protocol, SDK, web UI, or supported library boundary. |
-| Long-session behavior | Checkpoints are bounded, but there is no token accounting policy, context compaction, retry/backoff strategy, cancellation, or recovery after interrupted tool calls. |
+| Long-session behavior | Boundary-safe model compaction, cancellation, and interrupted-tool records now exist, but there is no token accounting policy, provider retry/backoff, deterministic replay, or quality evaluator for summaries. |
 | Production hardening | The Scheme evaluator’s authority surface needs a deeper audit, fuzzing, resource limits, symlink/race analysis, secret redaction, trace retention controls, and cross-platform testing. |
 | Mutation lifecycle | Live state can now be exported as a named artifact and an exact loaded artifact can be disabled, but there is no reviewed diff, patch composition UI, promotion into base source, migration, signature, or replay guarantee. |
 | Performance evidence | There are no benchmarks showing that live Scheme changes are faster or more reliable than editing and reloading an extension. |
@@ -41,7 +41,7 @@ documentation.
 | Stable capability ceiling | Pi explicitly has no built-in permission system; extensions run with the user process’s permissions. Here the live image cannot widen shell policy beyond `ask`, and file reads cross a stable project-root boundary. This is promising, not yet a security proof. |
 | Generation-attributed diagnosis | Pi has a vendor-neutral telemetry contract, but it deliberately ships without an exporter. It also has no equivalent code-generation identity to correlate a changed function with before/after answers. This harness records the selector, selected paths, generation, result, and tool/LLM tree locally and in Phoenix. |
 | Direct behavior patching by the model | Pi can ask the model to edit an extension and can arrange a follow-up reload, but the documented reload flow keeps the running handler in its old call frame. Here `live_eval` validates and activates a single function change for the next turn without rewriting a source file. |
-| Built-in subagents and plan mode | Pi deliberately omits these and expects packages to add them. This harness also lacks them; the difference is therefore not an advantage today. |
+| Built-in subagents and plan mode | Pi deliberately omits these and expects packages to add them. This harness also lacks them; `docs/subagents.md` proposes generation-pinned child sessions, but it is not an implementation advantage today. |
 
 Sources: Pi’s
 [`extension reload semantics`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md),

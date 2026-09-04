@@ -6,22 +6,35 @@
   #:use-module (ice-9 threads)
   #:use-module (ice-9 textual-ports)
   #:use-module (srfi srfi-1)
+  #:use-module (live-agent compaction)
   #:use-module (live-agent json)
   #:use-module (live-agent extensions)
   #:use-module (live-agent generation)
   #:use-module (live-agent provider)
+  #:use-module (live-agent recovery)
   #:use-module (live-agent runtime)
   #:use-module (live-agent session)
   #:use-module (live-agent trace)
   #:use-module (live-agent tools)
   #:export (main))
 
+(define turn-active? #f)
+
+(define (cancelled? key)
+  (eq? key 'turn-cancelled))
+
+(define (install-cancellation-handler!)
+  (sigaction
+   SIGINT
+   (lambda _
+     (when turn-active? (throw 'turn-cancelled "cancelled by user")))))
+
 (define (usage)
   (display
    (string-append
-    "Usage: lisp-agent [--agent PATH] [--state-dir PATH] [--watch|--no-watch]\n"
+    "Usage: shift [--agent PATH] [--state-dir PATH] [--watch|--no-watch]\n"
     "                  [--session NAME|--new-session NAME|--resume NAME] [PROMPT]\n"
-    "       lisp-agent --list-sessions [--state-dir PATH]\n")))
+    "       shift --list-sessions [--state-dir PATH]\n")))
 
 (define (parse-arguments args)
   (let loop ((rest args) (agent #f) (state-dir #f) (watch? #t)
@@ -91,6 +104,10 @@
     "  /extension-disable NAME      remove its exact active patch\n"
     "  /extension-export NAME       save all active patches as an artifact\n"
     "  /traces           show recent spans with generation and context choices\n"
+    "  /compact          summarize older history and retain recent turns\n"
+    "  /recover          inspect an interrupted tool record\n"
+    "  /recover retry    explicitly retry the recorded tool call\n"
+    "  /recover discard  discard the recorded tool call\n"
     "  /session          show the durable session identity and checkpoint\n"
     "  /reset            clear conversation state\n"
     "  /help             show this help\n"
@@ -99,7 +116,7 @@
 (define (show-generation runtime)
   (let ((generation (runtime-current runtime)))
     (format #t
-            "generation ~a  fingerprint ~a~%agent ~a  provider ~s  model ~a~%endpoint ~a  api-key-env ~s~%stream ~s  thinking ~s~%tools ~s  shell ~s  patches ~a~%source ~a~%"
+            "generation ~a  fingerprint ~a~%agent ~a  provider ~s  model ~a~%endpoint ~a  api-key-env ~s~%stream ~s  thinking ~s~%tools ~s  shell ~s  patches ~a~%compaction threshold ~a  keep recent ~a~%source ~a~%"
             (generation-id generation)
             (generation-fingerprint generation)
             (generation-ref generation 'agent-name)
@@ -112,6 +129,8 @@
             (generation-ref generation 'agent-tools)
             (generation-ref generation 'agent-shell-policy)
             (length (generation-patches generation))
+            (generation-ref generation 'agent-compaction-threshold)
+            (generation-ref generation 'agent-compaction-keep-recent)
             (generation-source-path generation))))
 
 (define (short-fingerprint value)
@@ -123,7 +142,7 @@
 (define (show-banner runtime watch? session)
   (let ((generation (runtime-current runtime)))
     (format #t
-            "~%lisp-agent λ~%  ~a · generation ~a · ~a~%  ~a via ~a~%  stream ~a · thinking ~a · watch ~a~%  ~a tools · shell ~a · /help for commands~%~%"
+            "~%shift λ~%  ~a · generation ~a · ~a~%  ~a via ~a~%  stream ~a · thinking ~a · watch ~a~%  ~a tools · shell ~a · /help for commands~%~%"
             (generation-ref generation 'agent-name)
             (generation-id generation)
             (short-fingerprint (generation-fingerprint generation))
@@ -272,6 +291,66 @@
              (lambda _ (display line) (newline))))
          lines))))
 
+(define (session-trace-values tracer limit errors-only?)
+  (let* ((session-id (tracer-session-id tracer))
+         (values
+          (filter-map
+           (lambda (line)
+             (catch #t
+               (lambda ()
+                 (let* ((span (json-read line))
+                        (attributes (json-object-ref span "attributes"))
+                        (status (json-object-ref span "status" "")))
+                   (and
+                    (string=?
+                     (json-object-ref attributes "session.id" "") session-id)
+                    (or (not errors-only?)
+                        (member status '("ERROR" "CANCELLED")))
+                    span)))
+               (lambda _ #f)))
+           (trace-tail tracer 1000))))
+    (if (> (length values) limit) (take-right values limit) values)))
+
+(define (execute-traces tracer arguments)
+  (catch #t
+    (lambda ()
+      (let ((limit (json-object-ref arguments "limit" 12))
+            (errors-only? (json-object-ref arguments "errors_only" #f)))
+        (unless (and (integer? limit) (>= limit 1) (<= limit 50))
+          (error "trace limit must be an integer from 1 through 50" limit))
+        (unless (boolean? errors-only?)
+          (error "errors_only must be a boolean" errors-only?))
+        (let loop ((spans (session-trace-values tracer limit errors-only?))
+                   (truncated? #f))
+          (let ((encoded
+                 (json-write
+                  (json-object
+                   (cons "session_id" (tracer-session-id tracer))
+                   (cons "trace_file" (tracer-path tracer))
+                   (cons "truncated" truncated?)
+                   (cons "spans" (apply json-array spans))))))
+            (if (or (<= (string-length encoded) (* 64 1024))
+                    (null? spans))
+                (make-tool-result #t encoded)
+                (loop (cdr spans) #t))))))
+    (lambda (key . arguments)
+      (make-tool-result
+       #f (format #f "trace inspection failed (~a): ~s" key arguments)))))
+
+(define (runtime-state-directory tracer)
+  (dirname (tracer-path tracer)))
+
+(define (show-recovery tracer)
+  (let ((pending (recovery-read (runtime-state-directory tracer))))
+    (if pending
+        (format #t
+                "Interrupted tool may have partially executed.\n  tool ~a\n  generation ~a\n  started ~a\n  arguments ~a\nUse /recover retry only if repeating it is safe, or /recover discard.\n"
+                (json-object-ref pending "tool")
+                (json-object-ref pending "generation_id")
+                (json-object-ref pending "created_at")
+                (json-write (json-object-ref pending "arguments")))
+        (display "No interrupted tool call is pending.\n"))))
+
 (define (try-transition label thunk)
   (with-exception-handler
       (lambda (exception)
@@ -416,6 +495,13 @@
    ((string=? line "/generations") (show-generations runtime) 'continue)
    ((string=? line "/extensions") (show-extensions runtime) 'continue)
    ((string=? line "/traces") (show-traces tracer) 'continue)
+   ((string=? line "/compact") 'compact)
+   ((string=? line "/recover") (show-recovery tracer) 'continue)
+   ((string=? line "/recover retry") 'recover-retry)
+   ((string=? line "/recover discard")
+    (recovery-clear! (runtime-state-directory tracer))
+    (display "Interrupted tool record discarded; no tool was executed.\n")
+    'continue)
    ((string=? line "/session") (show-session session) 'continue)
    ((string=? line "/reload")
     (when (try-transition "reload" (lambda () (runtime-reload! runtime #t)))
@@ -550,6 +636,59 @@
      ((string? answer)
       (member (string-downcase (string-trim-both answer)) '("y" "yes")))
      (else #f))))
+
+(define (retry-interrupted-tool! runtime tracer)
+  (let* ((state-directory (runtime-state-directory tracer))
+         (pending (recovery-read state-directory)))
+    (if (not pending)
+        (begin
+          (display "No interrupted tool call is pending.\n")
+          #f)
+        (let* ((generation (runtime-current runtime))
+               (name (json-object-ref pending "tool"))
+               (arguments (json-object-ref pending "arguments"))
+               (enabled
+                (map tool-name (generation-ref generation 'agent-tools))))
+          (unless (member name enabled)
+            (error "the interrupted tool is no longer enabled" name))
+          (when (member name '("live_eval" "extension"))
+            (error
+             "live mutations cannot be replayed because their outcome is ambiguous; inspect the generation, then discard this record"
+             name))
+          (format #t
+                  "Retrying interrupted ~a call explicitly. It may have partially executed before interruption.\n"
+                  name)
+          (let* ((span
+                  (trace-start!
+                   tracer (string-append "tool." name ".recovery") "TOOL"
+                   `((generation.id . ,(generation-id generation))
+                     (tool.name . ,name)
+                     (recovery.retry . #t)
+                     (input.value . ,(json-write arguments)))))
+                 (outcome
+                  (if (string=? name "traces")
+                      (execute-traces tracer arguments)
+                      (execute-tool
+                       name arguments (getcwd)
+                       (generation-ref generation 'agent-shell-policy)
+                       confirm-shell)))
+                 (output (tool-result-output outcome)))
+            (trace-end!
+             span (if (tool-result-success? outcome) "OK" "ERROR")
+             `((output.value . ,output)))
+            (runtime-record!
+             runtime 'tool-recovery-retried
+             `((generation . ,(generation-id generation))
+               (tool . ,name)
+               (success . ,(tool-result-success? outcome))
+               (output . ,output)))
+            (recovery-clear! state-directory)
+            (format #t "Recovery result: ~a\n" output)
+            (make-message
+             "system"
+             (format #f
+                     "An interrupted ~a tool call was explicitly retried. Result: ~a. The original model continuation was lost; verify before relying on it."
+                     name output)))))))
 
 (define (record-input! runtime generation turn-count line)
   (runtime-record!
@@ -776,21 +915,41 @@
                        (format #f
                                "tool unavailable in this turn: ~a. It was not enabled by the active image or the user's explicit intent. Continue without it."
                                name))
-                      (cond
-                       ((string=? name "live_eval")
-                        (execute-live-eval
-                         runtime generation (tool-call-arguments call)
-                         (assistant-explained-change? messages)))
-                       ((string=? name "extension")
-                        (execute-extension
-                         runtime generation (tool-call-arguments call)))
-                       (else
-                        (execute-tool
-                         name
-                         (tool-call-arguments call)
-                         (getcwd)
-                         (generation-ref generation 'agent-shell-policy)
-                         confirm-shell)))))
+                      (begin
+                        ;; This write-ahead record is deliberately retained if
+                        ;; cancellation or process death interrupts execution.
+                        (recovery-write!
+                         (runtime-state-directory tracer)
+                         name (tool-call-arguments call)
+                         (generation-id generation))
+                        (catch #t
+                          (lambda ()
+                            (cond
+                             ((string=? name "live_eval")
+                              (execute-live-eval
+                               runtime generation (tool-call-arguments call)
+                               (assistant-explained-change? messages)))
+                             ((string=? name "extension")
+                              (execute-extension
+                               runtime generation (tool-call-arguments call)))
+                             ((string=? name "traces")
+                              (execute-traces tracer (tool-call-arguments call)))
+                             (else
+                              (execute-tool
+                               name
+                               (tool-call-arguments call)
+                               (getcwd)
+                               (generation-ref generation 'agent-shell-policy)
+                               confirm-shell))))
+                          (lambda (key . arguments)
+                            (if (cancelled? key)
+                                (begin
+                                  (trace-end!
+                                   span "CANCELLED"
+                                   `((error.message . "tool interrupted; recovery record retained")))
+                                  (apply throw key arguments))
+                                (make-tool-result
+                                 #f (format #f "tool failed (~a): ~s" key arguments))))))))
                  (ok? (tool-result-success? outcome))
                  (output (tool-result-output outcome)))
             (trace-end! span (if ok? "OK" "ERROR")
@@ -800,6 +959,8 @@
              `((generation . ,(generation-id generation))
                (tool . ,name)
                (output . ,output)))
+            (when enabled?
+              (recovery-clear! (runtime-state-directory tracer)))
             (loop (cdr remaining)
                   (append result
                           (list
@@ -874,7 +1035,7 @@
         (when (or thinking-started? content-started?)
           (newline)
           (force-output))
-        (trace-end! span "ERROR"
+        (trace-end! span (if (cancelled? key) "CANCELLED" "ERROR")
                     `((error.type . ,(symbol->string key))
                       (error.message . ,(format #f "~s" arguments))))
         (apply throw key arguments)))))
@@ -959,6 +1120,91 @@
                 enabled-tools)
                (+ round 1))))))))
 
+(define (summarize-compaction generation prefix)
+  (if (string=? (generation-ref generation 'agent-model) "demo")
+      (format #f "Compacted ~a earlier messages from the demo session."
+              (length prefix))
+      (let* ((provider (generation-ref generation 'agent-provider))
+             (key-environment
+              (generation-ref generation 'agent-api-key-environment))
+             (api-key (and key-environment (getenv key-environment)))
+             (completion
+              (provider-complete
+               provider
+               (generation-ref generation 'agent-model)
+               (generation-ref generation 'agent-base-url)
+               api-key
+               (list
+                (make-message
+                 "system"
+                 (string-append
+                  "Summarize the earlier agent conversation for safe continuation. "
+                  "Preserve user intent, decisions, exact file paths, generation changes, "
+                  "tool outcomes, unresolved work, and safety constraints. Do not claim "
+                  "success without a recorded tool result. Return only the compact summary."))
+                (make-message
+                 "user" (json-write (apply json-array prefix))))
+               '() #f #f (lambda _ #t) (lambda _ #t))))
+        (let ((summary (or (completion-content completion) "")))
+          (when (string-null? (string-trim-both summary))
+            (error "compaction model returned an empty summary"))
+          summary))))
+
+(define (compact-history! runtime tracer history force?)
+  (let* ((generation (runtime-current runtime))
+         (threshold
+          (generation-ref generation 'agent-compaction-threshold))
+         (keep-recent
+          (generation-ref generation 'agent-compaction-keep-recent)))
+    (if (not (or force? (history-needs-compaction? history threshold)))
+        (begin
+          (when force?
+            (format #t "History has ~a messages; nothing is old enough to compact.\n"
+                    (length history)))
+          history)
+        (let ((prefix (compaction-prefix history keep-recent)))
+          (if (null? prefix)
+              history
+              (let ((span
+                     (trace-start!
+                      tracer "session.compact" "AGENT"
+                      `((generation.id . ,(generation-id generation))
+                        (compaction.before_messages . ,(length history))
+                        (compaction.prefix_messages . ,(length prefix))
+                        (compaction.keep_recent . ,keep-recent)))))
+                (dynamic-wind
+                  (lambda () (set! turn-active? #t))
+                  (lambda ()
+                    (catch #t
+                      (lambda ()
+                        (let* ((summary (summarize-compaction generation prefix))
+                               (compacted
+                                (compact-history-with-summary
+                                 history summary keep-recent)))
+                          (trace-end!
+                           span "OK"
+                           `((generation.id . ,(generation-id generation))
+                             (compaction.after_messages . ,(length compacted))
+                             (output.value . ,summary)))
+                          (runtime-record!
+                           runtime 'session-compacted
+                           `((generation . ,(generation-id generation))
+                             (before-messages . ,(length history))
+                             (after-messages . ,(length compacted))))
+                          (format #t "compacted ~a messages to ~a · generation ~a\n"
+                                  (length history) (length compacted)
+                                  (generation-id generation))
+                          compacted))
+                      (lambda (key . arguments)
+                        (trace-end!
+                         span (if (cancelled? key) "CANCELLED" "ERROR")
+                         `((error.message . ,(format #f "~s" arguments))))
+                        (format (current-error-port)
+                                "compaction failed; original history retained: ~s~%"
+                                arguments)
+                        history)))
+                  (lambda () (set! turn-active? #f)))))))))
+
 (define (perform-turn! runtime tracer history line turn-count)
   (let* ((generation (runtime-current runtime))
          (span
@@ -968,22 +1214,34 @@
              (turn.number . ,turn-count)
              (input.value . ,line)))))
     (record-input! runtime generation turn-count line)
-    (with-exception-handler
-        (lambda (exception)
-          (trace-end! span "ERROR"
-                      `((error.message . ,(exception-detail exception))))
-          (format (current-error-port) "turn failed: ~a~%"
-                  (exception-detail exception))
-          #f)
+    (dynamic-wind
+      (lambda () (set! turn-active? #t))
       (lambda ()
-        (let ((new-history
-               (if (string=? (generation-ref generation 'agent-model) "demo")
-                   (demo-turn! runtime generation history line turn-count)
-                   (provider-turn!
-                    runtime tracer span generation history line turn-count))))
-          (trace-end! span "OK" `((output.value . ,(cadr new-history))))
-          (list 'ok (car new-history))))
-      #:unwind? #t)))
+        (catch #t
+          (lambda ()
+            (let ((new-history
+                   (if (string=? (generation-ref generation 'agent-model) "demo")
+                       (demo-turn! runtime generation history line turn-count)
+                       (provider-turn!
+                        runtime tracer span generation history line turn-count))))
+              (trace-end! span "OK" `((output.value . ,(cadr new-history))))
+              (list 'ok (car new-history))))
+          (lambda (key . arguments)
+            (if (cancelled? key)
+                (begin
+                  (trace-end! span "CANCELLED"
+                              '((error.message . "cancelled by user")))
+                  (runtime-record!
+                   runtime 'turn-cancelled
+                   `((generation . ,(generation-id generation))
+                     (turn . ,turn-count)))
+                  (display "turn cancelled; conversation state is unchanged.\n")
+                  #f)
+                (let ((detail (format #f "~s: ~s" key arguments)))
+                  (trace-end! span "ERROR" `((error.message . ,detail)))
+                  (format (current-error-port) "turn failed: ~a~%" detail)
+                  #f)))))
+      (lambda () (set! turn-active? #f)))))
 
 (define (repl runtime tracer watch? session checkpoint! initial-prompt)
   (show-banner runtime watch? session)
@@ -996,11 +1254,12 @@
                (perform-turn! runtime tracer history pending turn-count)))
           (if result
               (let ((next-turn (+ turn-count 1))
-                    (next-history (cadr result)))
+                    (next-history
+                     (compact-history! runtime tracer (cadr result) #f)))
                 (checkpoint! next-history next-turn)
                 (loop next-turn next-history #f))
               (loop turn-count history #f)))
-        (let ((line (read-user-line "live-agent> ")))
+        (let ((line (read-user-line "shift> ")))
       (cond
        ((eof-object? line)
         (checkpoint! history turn-count)
@@ -1016,6 +1275,21 @@
            (display "Conversation state cleared.\n")
            (checkpoint! '() 1)
            (loop 1 '() #f))
+          ((compact)
+           (let ((compacted (compact-history! runtime tracer history #t)))
+             (checkpoint! compacted turn-count)
+             (loop turn-count compacted #f)))
+          ((recover-retry)
+           (let ((recovery-message
+                  (try-transition
+                   "tool recovery"
+                   (lambda () (retry-interrupted-tool! runtime tracer)))))
+             (let ((recovered-history
+                    (if recovery-message
+                        (append history (list recovery-message))
+                        history)))
+               (checkpoint! recovered-history turn-count)
+               (loop turn-count recovered-history #f))))
           (else
            (checkpoint! history turn-count)
            (loop turn-count history #f))))
@@ -1023,7 +1297,8 @@
         (let ((result (perform-turn! runtime tracer history line turn-count)))
           (if result
               (let ((next-turn (+ turn-count 1))
-                    (next-history (cadr result)))
+                    (next-history
+                     (compact-history! runtime tracer (cadr result) #f)))
                 (checkpoint! next-history next-turn)
                 (loop next-turn next-history #f))
               (loop turn-count history #f)))))))))
@@ -1066,11 +1341,13 @@
               (and runtime
                    (make-tracer
                     runtime-state-directory
-                    (or (getenv "LISP_AGENT_OTEL_ENDPOINT")
+                    (or (getenv "SHIFT_OTEL_ENDPOINT")
+                        (getenv "LISP_AGENT_OTEL_ENDPOINT")
                         (getenv "PHOENIX_COLLECTOR_ENDPOINT"))
                     (and session (session-id session))
                     (and session (session-name session))))))
         (unless runtime (exit 1))
+        (install-cancellation-handler!)
         (let ((checkpoint-history
                (if session (session-history session) '()))
               (checkpoint-turn
@@ -1098,6 +1375,9 @@
           (dynamic-wind
             (lambda () #t)
             (lambda ()
+              (when (recovery-read runtime-state-directory)
+                (display
+                 "\n! interrupted tool record found; use /recover before continuing.\n"))
               (repl runtime tracer watch? session checkpoint! initial-prompt))
             (lambda ()
               (stop-watcher!)

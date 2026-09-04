@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -48,6 +48,60 @@ class FakeOllamaHandler(BaseHTTPRequestHandler):
                 "done": True,
             }
         body = (json.dumps(payload) + "\n").encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/x-ndjson")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class SlowOllamaHandler(BaseHTTPRequestHandler):
+    started = threading.Event()
+    release = threading.Event()
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length", "0"))
+        self.rfile.read(length)
+        type(self).started.set()
+        type(self).release.wait(10)
+        body = (json.dumps({"message": {"role": "assistant", "content": "late"}, "done": True}) + "\n").encode()
+        try:
+            self.send_response(200)
+            self.send_header("content-type", "application/x-ndjson")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TraceOllamaHandler(BaseHTTPRequestHandler):
+    calls = 0
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length", "0"))
+        self.rfile.read(length)
+        type(self).calls += 1
+        if type(self).calls == 1:
+            message = {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_traces",
+                        "function": {"name": "traces", "arguments": {"limit": 10}},
+                    }
+                ],
+            }
+        else:
+            message = {"role": "assistant", "content": "trace inspected"}
+        body = (json.dumps({"message": message, "done": True}) + "\n").encode()
         self.send_response(200)
         self.send_header("content-type", "application/x-ndjson")
         self.send_header("content-length", str(len(body)))
@@ -124,6 +178,8 @@ class McpBridgeTest(unittest.TestCase):
     def test_codex_can_operate_one_live_session(self):
         tools = self.rpc("tools/list")["tools"]
         self.assertIn("live_session_send", {tool["name"] for tool in tools})
+        self.assertIn("live_session_cancel", {tool["name"] for tool in tools})
+        self.assertIn("live_session_recovery", {tool["name"] for tool in tools})
 
         started = self.call("live_session_start", {"agent": "test/session-agent.scm"})
         self.assertTrue(started["running"])
@@ -140,6 +196,33 @@ class McpBridgeTest(unittest.TestCase):
         response = self.call("live_session_send", {"text": "hello"})
         self.assertEqual(response["state"], "ready")
         self.assertIn("[mcp-test] hello", response["output"])
+
+        recovery_path = self.state_dir / "sessions/default/interrupted-tool.json"
+        recovery_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "execution-started",
+                    "tool": "read",
+                    "arguments": {"path": "README.md"},
+                    "generation_id": 1,
+                    "created_at": "2026-09-04T00:00:00Z",
+                }
+            )
+            + "\n"
+        )
+        recovery = self.call("live_session_recovery", {"action": "status"})
+        self.assertIn("may have partially executed", recovery["output"])
+        retried = self.call("live_session_recovery", {"action": "retry"})
+        self.assertIn("Recovery result:", retried["output"])
+        self.assertFalse(recovery_path.exists())
+
+        self.call("live_session_send", {"text": "second"})
+        self.call("live_session_send", {"text": "third"})
+        compacted = self.call("live_session_compact")
+        self.assertIn("compacted", compacted["output"])
+        traces = self.call("live_session_traces")
+        self.assertIn("session.compact", traces["output"])
 
         setting = self.call(
             "live_session_set", {"name": "thinking", "value": "on"}
@@ -170,7 +253,7 @@ class McpBridgeTest(unittest.TestCase):
         self.assertIn("generation 4", shell_settings["output"])
 
         approval_boundary = self.call(
-            "live_session_send", {"text": "run the requested shell", "timeout_seconds": 5}
+            "live_session_send", {"text": "run the requested shell", "timeout_seconds": 10}
         )
         self.assertEqual(approval_boundary["state"], "needs_approval")
         self.assertIn("printf approved", approval_boundary["output"])
@@ -178,9 +261,9 @@ class McpBridgeTest(unittest.TestCase):
         # The bridge sends only this one byte. If the terminal still required
         # Enter, this call would time out instead of reaching the next prompt.
         approved = self.call(
-            "live_session_approve", {"approved": True, "timeout_seconds": 5}
+            "live_session_approve", {"approved": True, "timeout_seconds": 10}
         )
-        self.assertEqual(approved["state"], "ready")
+        self.assertEqual(approved["state"], "ready", approved)
         self.assertIn("shell approved", approved["output"])
 
         stopped = self.call("live_session_stop")
@@ -293,6 +376,10 @@ class ExtensionToolMappingTest(unittest.TestCase):
         server.call_tool("live_extension", {"action": "load", "name": "terse"})
         server.call_tool("live_extension", {"action": "disable", "name": "terse"})
         server.call_tool("live_extension", {"action": "export", "name": "snapshot"})
+        server.call_tool("live_session_traces", {})
+        server.call_tool("live_session_compact", {})
+        server.call_tool("live_session_recovery", {"action": "status"})
+        server.call_tool("live_session_recovery", {"action": "discard"})
         self.assertEqual(
             session.commands,
             [
@@ -301,6 +388,10 @@ class ExtensionToolMappingTest(unittest.TestCase):
                 "/extension-load terse",
                 "/extension-disable terse",
                 "/extension-export snapshot",
+                "/traces",
+                "/compact",
+                "/recover",
+                "/recover discard",
             ],
         )
         shutil.rmtree(state_root, ignore_errors=True)
@@ -315,12 +406,12 @@ class HotReloadTest(unittest.TestCase):
             (project_root / "agent").mkdir()
             (project_root / "extensions").mkdir()
             (project_root / "src").symlink_to(ROOT / "src", target_is_directory=True)
-            shutil.copy2(ROOT / "bin/lisp-agent", project_root / "bin/lisp-agent")
+            shutil.copy2(ROOT / "bin/shift", project_root / "bin/shift")
             agent_path = project_root / "agent/default.scm"
             source = (ROOT / "test/session-agent.scm").read_text()
             agent_path.write_text(source)
 
-            session = LiveSession(project_root, project_root / ".lisp-agent")
+            session = LiveSession(project_root, project_root / ".shift")
             started = session.start()
             self.assertEqual(started["state"], "ready")
             cursor = started["cursor"]
@@ -360,6 +451,101 @@ class HotReloadTest(unittest.TestCase):
             time.sleep(0.05)
         raise AssertionError(f"timed out waiting for {expected!r}; output={output!r}")
 
+
+class CancellationTest(unittest.TestCase):
+    def test_cancellation_interrupts_provider_and_preserves_the_prompt(self):
+        SlowOllamaHandler.started.clear()
+        SlowOllamaHandler.release.clear()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowOllamaHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        project_root = Path(tempfile.mkdtemp(prefix="shift-cancel-test-"))
+        session = None
+        try:
+            (project_root / "bin").mkdir()
+            (project_root / "agent").mkdir()
+            (project_root / "extensions").mkdir()
+            (project_root / "src").symlink_to(ROOT / "src", target_is_directory=True)
+            shutil.copy2(ROOT / "bin/shift", project_root / "bin/shift")
+            image = (ROOT / "test/session-agent.scm").read_text()
+            image = image.replace('(define agent-model "demo")', '(define agent-model "fake")')
+            image = image.replace(
+                '(define agent-base-url "http://127.0.0.1:11434")',
+                f'(define agent-base-url "http://127.0.0.1:{server.server_address[1]}")',
+            )
+            image = image.replace("(define agent-tools '(read rg))", "(define agent-tools '())")
+            (project_root / "agent/default.scm").write_text(image)
+            session = LiveSession(project_root, project_root / ".shift")
+            self.assertEqual(session.start()["state"], "ready")
+
+            result: dict[str, Any] = {}
+
+            def run_turn():
+                result.update(session.send("cancel me", 15))
+
+            turn = threading.Thread(target=run_turn)
+            turn.start()
+            self.assertTrue(SlowOllamaHandler.started.wait(5))
+            cancelled = session.cancel(5)
+            self.assertEqual(cancelled["state"], "ready", cancelled)
+            self.assertIn("turn cancelled", cancelled["output"])
+            turn.join(5)
+            self.assertFalse(turn.is_alive())
+            self.assertEqual(result["state"], "ready")
+        finally:
+            SlowOllamaHandler.release.set()
+            if session is not None:
+                session.stop()
+            server.shutdown()
+            server.server_close()
+            shutil.rmtree(project_root, ignore_errors=True)
+
+
+class TraceToolTest(unittest.TestCase):
+    def test_agent_can_inspect_its_session_scoped_traces(self):
+        TraceOllamaHandler.calls = 0
+        server = HTTPServer(("127.0.0.1", 0), TraceOllamaHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        project_root = Path(tempfile.mkdtemp(prefix="shift-trace-tool-test-"))
+        session = None
+        try:
+            (project_root / "bin").mkdir()
+            (project_root / "agent").mkdir()
+            (project_root / "extensions").mkdir()
+            (project_root / "src").symlink_to(ROOT / "src", target_is_directory=True)
+            shutil.copy2(ROOT / "bin/shift", project_root / "bin/shift")
+            image = (ROOT / "test/session-agent.scm").read_text()
+            image = image.replace('(define agent-model "demo")', '(define agent-model "fake")')
+            image = image.replace(
+                '(define agent-base-url "http://127.0.0.1:11434")',
+                f'(define agent-base-url "http://127.0.0.1:{server.server_address[1]}")',
+            )
+            image = image.replace("(define agent-tools '(read rg))", "(define agent-tools '(traces))")
+            (project_root / "agent/default.scm").write_text(image)
+            session = LiveSession(project_root, project_root / ".shift")
+            self.assertEqual(session.start()["state"], "ready")
+            response = session.send("inspect your trace", 10)
+            self.assertEqual(response["state"], "ready")
+            self.assertIn("trace inspected", response["output"])
+            checkpoint = json.loads(
+                (project_root / ".shift/sessions/default/session.json").read_text()
+            )
+            tool_messages = [
+                message for message in checkpoint["history"] if message.get("role") == "tool"
+            ]
+            self.assertTrue(tool_messages)
+            self.assertIn('"session_id"', tool_messages[0]["content"])
+            self.assertIn(
+                '"name":"tool.traces"',
+                (project_root / ".shift/sessions/default/traces.jsonl").read_text(),
+            )
+        finally:
+            if session is not None:
+                session.stop()
+            server.shutdown()
+            server.server_close()
+            shutil.rmtree(project_root, ignore_errors=True)
 
 if __name__ == "__main__":
     unittest.main()

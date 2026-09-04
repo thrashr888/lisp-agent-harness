@@ -25,4 +25,4 @@ make demo-context-scripted
 The memorable bit is not merely that the second answer is right. `/traces`
 shows the current session's `context.select` RETRIEVER spans, their selected
 file paths, and the generation attached to each answer. Phoenix shows the same
-trace tree in the `lisp-agent-harness` project at `http://localhost:6006`.
+trace tree in the `shift` project at `http://localhost:6006`.

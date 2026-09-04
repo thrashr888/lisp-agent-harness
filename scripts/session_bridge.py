@@ -8,6 +8,7 @@ import json
 import os
 import pty
 import re
+import signal
 import subprocess
 import sys
 import termios
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 
-PROMPT = "live-agent> "
+PROMPT = "shift> "
 APPROVAL_PROMPT = "Approve this command? [y/N] "
 MAX_TRANSCRIPT_CHARS = 2 * 1024 * 1024
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
@@ -48,13 +49,13 @@ def session_schema(
 TOOLS = [
     {
         "name": "live_sessions_list",
-        "description": "List durable and currently running Lisp agent sessions.",
+        "description": "List durable and currently running shift sessions.",
         "inputSchema": object_schema({}),
         "annotations": {"readOnlyHint": True},
     },
     {
         "name": "live_session_start",
-        "description": "Start or resume one named MCP-owned live Lisp agent session.",
+        "description": "Start or resume one named MCP-owned shift session.",
         "inputSchema": session_schema(
             {
                 "agent": {"type": "string", "description": "Optional project-relative agent image path."},
@@ -107,6 +108,36 @@ TOOLS = [
                 "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
             },
             ["approved"],
+        ),
+    },
+    {
+        "name": "live_session_cancel",
+        "description": "Cancel the in-flight turn or compaction and keep prior conversation state.",
+        "inputSchema": session_schema(
+            {"timeout_seconds": {"type": "number", "minimum": 1, "maximum": 60}}
+        ),
+    },
+    {
+        "name": "live_session_traces",
+        "description": "Show recent trace spans for this session, including generation and errors.",
+        "inputSchema": session_schema({}),
+    },
+    {
+        "name": "live_session_compact",
+        "description": "Compact older session history into a traced summary now.",
+        "inputSchema": session_schema(
+            {"timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600}}
+        ),
+    },
+    {
+        "name": "live_session_recovery",
+        "description": "Inspect, explicitly retry, or discard an interrupted tool record.",
+        "inputSchema": session_schema(
+            {
+                "action": {"type": "string", "enum": ["status", "retry", "discard"]},
+                "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
+            },
+            ["action"],
         ),
     },
     {
@@ -170,6 +201,8 @@ class LiveSession:
         self._base_cursor = 0
         self._transcript = ""
         self._condition = threading.Condition()
+        self._command_lock = threading.Lock()
+        self._busy = False
 
     def _running(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -283,7 +316,7 @@ class LiveSession:
         environment = os.environ.copy()
         environment.setdefault("TERM", "dumb")
         command = [
-            str(self.project_root / "bin/lisp-agent"),
+            str(self.project_root / "bin/shift"),
             "--agent",
             str(image),
             "--state-dir",
@@ -302,6 +335,7 @@ class LiveSession:
                 stdout=slave_fd,
                 stderr=slave_fd,
                 close_fds=True,
+                start_new_session=True,
             )
         finally:
             os.close(slave_fd)
@@ -320,6 +354,7 @@ class LiveSession:
             "cursor": self._cursor(),
             "state_dir": str(self.state_dir),
             "resumable": (self.state_dir / "session.json").is_file(),
+            "recovery_pending": (self.state_dir / "interrupted-tool.json").is_file(),
         }
         try:
             checkpoint = json.loads((self.state_dir / "session.json").read_text())
@@ -339,18 +374,45 @@ class LiveSession:
             raise ValueError("text must be a non-empty string")
         if self._awaiting_approval():
             raise RuntimeError("a shell request is waiting; approve or deny it before sending input")
-        marker = self._cursor()
-        self._write(text.encode("utf-8") + b"\n")
-        return self._wait_for_boundary(marker, timeout_seconds)
+        with self._command_lock:
+            marker = self._cursor()
+            with self._condition:
+                self._busy = True
+            try:
+                self._write(text.encode("utf-8") + b"\n")
+                return self._wait_for_boundary(marker, timeout_seconds)
+            finally:
+                with self._condition:
+                    self._busy = False
 
     def approve(self, approved: bool, timeout_seconds: float = 180) -> dict[str, Any]:
         if not isinstance(approved, bool):
             raise ValueError("approved must be a boolean")
         if not self._awaiting_approval():
             raise RuntimeError("the live session is not waiting for shell approval")
+        with self._command_lock:
+            marker = self._cursor()
+            with self._condition:
+                self._busy = True
+            try:
+                self._write(b"y" if approved else b"n")
+                return self._wait_for_boundary(marker, timeout_seconds)
+            finally:
+                with self._condition:
+                    self._busy = False
+
+    def cancel(self, timeout_seconds: float = 15) -> dict[str, Any]:
+        if not self._running() or self.process is None:
+            raise RuntimeError("the live session has no running turn to cancel")
+        with self._condition:
+            busy = self._busy
+        if not (busy or self._awaiting_approval()):
+            raise RuntimeError("the live session is idle; there is no turn to cancel")
         marker = self._cursor()
-        self._write(b"y" if approved else b"n")
-        return self._wait_for_boundary(marker, timeout_seconds)
+        os.killpg(self.process.pid, signal.SIGINT)
+        result = self._wait_for_boundary(marker, timeout_seconds)
+        result.update(self.status())
+        return result
 
     def read(self, cursor: int | None = None) -> dict[str, Any]:
         with self._condition:
@@ -375,11 +437,11 @@ class LiveSession:
             self._write(b"/quit\n")
             self.process.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            self.process.terminate()
+            os.killpg(self.process.pid, signal.SIGTERM)
             try:
                 self.process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.wait(timeout=2)
         if self.master_fd is not None:
             try:
@@ -407,6 +469,7 @@ class McpServer:
         self.state_root = state_root.resolve()
         self.session_factory = session_factory
         self.sessions: dict[str, LiveSession] = {}
+        self._sessions_lock = threading.Lock()
 
     @staticmethod
     def _session_name(arguments: dict[str, Any]) -> str:
@@ -417,11 +480,12 @@ class McpServer:
 
     def _session(self, arguments: dict[str, Any]) -> LiveSession:
         name = self._session_name(arguments)
-        if name not in self.sessions:
-            self.sessions[name] = self.session_factory(
-                self.project_root, self.state_root, name
-            )
-        return self.sessions[name]
+        with self._sessions_lock:
+            if name not in self.sessions:
+                self.sessions[name] = self.session_factory(
+                    self.project_root, self.state_root, name
+                )
+            return self.sessions[name]
 
     def _list_sessions(self) -> dict[str, Any]:
         names = set(self.sessions)
@@ -469,6 +533,21 @@ class McpServer:
                 arguments["approved"],
                 float(arguments.get("timeout_seconds", 180)),
             )
+        elif name == "live_session_cancel":
+            result = session.cancel(float(arguments.get("timeout_seconds", 15)))
+        elif name == "live_session_traces":
+            result = self._run_command(session, "/traces", arguments)
+        elif name == "live_session_compact":
+            result = self._run_command(session, "/compact", arguments)
+        elif name == "live_session_recovery":
+            action = arguments.get("action")
+            if action == "status":
+                command = "/recover"
+            elif action in {"retry", "discard"}:
+                command = f"/recover {action}"
+            else:
+                raise ValueError("recovery action must be status, retry, or discard")
+            result = self._run_command(session, command, arguments)
         elif name == "live_session_set":
             setting = arguments.get("name")
             value = arguments.get("value")
@@ -531,7 +610,7 @@ class McpServer:
             result = {
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "lisp-agent-harness", "version": "0.1.0"},
+                "serverInfo": {"name": "shift", "version": "0.2.0"},
             }
         elif method == "tools/list":
             result = {"tools": TOOLS}
@@ -564,26 +643,37 @@ def main() -> int:
     parser.add_argument("--state-dir")
     options = parser.parse_args()
     project_root = Path(__file__).resolve().parents[1]
-    state_dir = Path(options.state_dir) if options.state_dir else project_root / ".lisp-agent"
+    state_dir = Path(options.state_dir) if options.state_dir else project_root / ".shift"
     server = McpServer(project_root, state_dir)
+    output_lock = threading.Lock()
+    workers: list[threading.Thread] = []
+
+    def dispatch(line: str) -> None:
+        request: dict[str, Any] = {}
+        try:
+            request = json.loads(line)
+            response = server.handle(request)
+        except Exception as error:
+            request_id = request.get("id") if isinstance(request, dict) else None
+            response = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32603, "message": str(error)},
+            }
+        if response is not None:
+            with output_lock:
+                print(json.dumps(response, separators=(",", ":")), flush=True)
+
     try:
         for line in sys.stdin:
             if not line.strip():
                 continue
-            request: dict[str, Any] = {}
-            try:
-                request = json.loads(line)
-                response = server.handle(request)
-            except Exception as error:
-                request_id = request.get("id") if isinstance(request, dict) else None
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {"code": -32603, "message": str(error)},
-                }
-            if response is not None:
-                print(json.dumps(response, separators=(",", ":")), flush=True)
+            worker = threading.Thread(target=dispatch, args=(line,), daemon=True)
+            workers.append(worker)
+            worker.start()
     finally:
+        for worker in workers:
+            worker.join(timeout=1)
         server.close()
     return 0
 

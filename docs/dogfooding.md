@@ -1,4 +1,4 @@
-# Dogfooding the harness inside itself
+# Dogfooding shift inside itself
 
 The harness can now do useful work on its own repository without pretending it
 is ready to replace a mature coding agent. The safe shape is a two-level loop:
@@ -37,17 +37,18 @@ granting the inner model authority to accept its own runtime changes.
 
 - There is no first-class diff, patch-hunk, git-status, diagnostics, or test tool;
   those actions currently fall back to approval-gated shell.
-- Long sessions have a hard checkpoint bound but no token budgeting, compaction,
-  summarization, or branch/fork model.
-- An interrupted tool approval is journaled but not resumable as an outstanding
-  operation; the user must retry the turn.
-- There is no cancel/interrupt control, background job model, provider retry,
+- Long sessions now compact into a traced summary, but there is no token-budget
+  policy, summary-quality evaluator, or branch/fork model.
+- Interrupted tools leave an explicit write-ahead record with manual
+  retry/discard. There is no exact mid-process continuation or deterministic
+  replay, so a mutating retry may still be ambiguous.
+- Turns can be cancelled, but there is no background job model, provider retry,
   model fallback, or concurrent tool execution.
 - Stable-runtime upgrades need the versioned supervisor/handoff described in
   `docs/live-updates.md`; only the user-owned live image updates in process.
 - The Scheme evaluator and filesystem confinement need deeper adversarial tests,
   resource limits, secret redaction, and cross-platform validation.
-- Durable checkpoints are local and gitignored under `.lisp-agent/`, with no
+- Durable checkpoints are local and gitignored under `.shift/`, with no
   built-in export or share workflow yet.
 
 The milestone for broader dogfooding is not feature parity with Pi. It is being

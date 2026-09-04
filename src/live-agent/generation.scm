@@ -29,6 +29,8 @@
     agent-stream?
     agent-thinking
     agent-max-tool-rounds
+    agent-compaction-threshold
+    agent-compaction-keep-recent
     agent-system-prompt
     agent-tools
     agent-shell-policy
@@ -199,12 +201,21 @@
       (error "agent-thinking must be #t, #f, low, medium, or high" thinking))
     (unless (and (list? tools)
                  (every (lambda (tool)
-                          (memq tool '(read rg write edit shell live_eval extension)))
+                          (memq tool '(read rg write edit shell traces live_eval extension)))
                         tools))
       (error "agent-tools contains an unsupported tool" tools)))
   (let ((rounds (module-ref module 'agent-max-tool-rounds)))
     (unless (and (integer? rounds) (>= rounds 0) (<= rounds 8))
       (error "agent-max-tool-rounds must be an integer from 0 through 8" rounds)))
+  (let ((threshold (module-ref module 'agent-compaction-threshold))
+        (keep-recent (module-ref module 'agent-compaction-keep-recent)))
+    (unless (and (integer? threshold) (>= threshold 8) (<= threshold 2000))
+      (error "agent-compaction-threshold must be an integer from 8 through 2000"
+             threshold))
+    (unless (and (integer? keep-recent) (>= keep-recent 4)
+                 (< keep-recent threshold))
+      (error "agent-compaction-keep-recent must be at least 4 and below the threshold"
+             keep-recent)))
   (let ((selector (module-ref module 'agent-select-context)))
     (unless (procedure? selector)
       (error "agent-select-context must be a procedure"))

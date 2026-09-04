@@ -103,7 +103,7 @@
 
 (define (atomic-write-file path content)
   (let ((temporary
-         (string-append (dirname path) "/.lisp-agent-write-"
+         (string-append (dirname path) "/.shift-write-"
                         (number->string (getpid)) "-XXXXXX")))
     (let* ((port (mkstemp temporary))
            (actual (port-filename port)))

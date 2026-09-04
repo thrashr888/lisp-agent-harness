@@ -59,13 +59,13 @@ def export_trace(tracer: trace.Tracer, records: list[dict]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", required=True)
-    parser.add_argument("--project", default="lisp-agent-harness")
+    parser.add_argument("--project", default="shift")
     args = parser.parse_args()
 
     provider = TracerProvider(
         resource=Resource.create(
             {
-                "service.name": "lisp-agent-harness",
+                "service.name": "shift",
                 "openinference.project.name": args.project,
             }
         )
@@ -86,7 +86,7 @@ def main() -> int:
         )
     )
     trace.set_tracer_provider(provider)
-    tracer = trace.get_tracer("lisp-agent-harness")
+    tracer = trace.get_tracer("shift")
     pending: dict[str, list[dict]] = defaultdict(list)
 
     try:

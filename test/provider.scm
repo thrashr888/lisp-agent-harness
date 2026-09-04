@@ -60,11 +60,11 @@
   (make-ollama-request
    "fixture"
    (list (make-message "user" "work"))
-   '("read" "rg" "write" "edit" "shell" "live_eval" "extension")
+   '("read" "rg" "write" "edit" "shell" "traces" "live_eval" "extension")
    #t #f))
 
 (test-equal "serializes every constrained coding and mutation tool"
-  7
+  8
   (length
    (json-array-items (json-object-ref coding-tools-request "tools"))))
 

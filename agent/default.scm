@@ -9,6 +9,8 @@
 (define agent-stream? #t)
 (define agent-thinking #f)
 (define agent-max-tool-rounds 6)
+(define agent-compaction-threshold 80)
+(define agent-compaction-keep-recent 24)
 
 (define agent-system-prompt
   (string-append
@@ -22,7 +24,8 @@
    "The prompt binding is exactly "
    "agent-system-prompt; use (set! agent-system-prompt (string-append "
    "agent-system-prompt \" ...\")) to extend it. Never guess starred binding names. "
-   "Prefer read for known files and rg for project search. Use edit for exact changes "
+   "Prefer read for known files and rg for project search. Use traces to verify your "
+   "own recent tool outcomes, errors, generation changes, and context choices. Use edit for exact changes "
    "and write for complete new file content. Only use write or edit when the user explicitly "
    "asked to change project files; answer ordinary content requests in the conversation. "
    "Use one most-likely path at a time instead "
@@ -41,7 +44,7 @@
 
 ;; Tool names are data owned by the live image. The stable runtime owns their
 ;; capability checks and implementations.
-(define agent-tools '(read rg write edit shell live_eval extension))
+(define agent-tools '(read rg write edit shell traces live_eval extension))
 
 ;; The prototype deliberately supports only deny and ask. A live image cannot
 ;; silently broaden the stable runtime's authority.

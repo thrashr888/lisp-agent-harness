@@ -15,6 +15,8 @@
    "(define agent-stream? #t)\n"
    "(define agent-thinking #f)\n"
    "(define agent-max-tool-rounds 2)\n"
+   "(define agent-compaction-threshold 12)\n"
+   "(define agent-compaction-keep-recent 4)\n"
    "(define agent-system-prompt \"fixture prompt\")\n"
    "(define agent-tools '(read))\n"
    "(define agent-shell-policy 'deny)\n"

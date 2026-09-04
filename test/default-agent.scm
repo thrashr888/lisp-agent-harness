@@ -34,8 +34,14 @@
   (memq 'live_eval (generation-ref generation 'agent-tools)))
 
 (test-equal "enables the complete constrained coding tool set"
-  '(read rg write edit shell live_eval extension)
+  '(read rg write edit shell traces live_eval extension)
   (generation-ref generation 'agent-tools))
+
+(test-equal "compacts after a bounded number of messages"
+  80 (generation-ref generation 'agent-compaction-threshold))
+
+(test-equal "retains recent messages after compaction"
+  24 (generation-ref generation 'agent-compaction-keep-recent))
 
 (test-assert "guides import questions toward Guile module forms"
   (and

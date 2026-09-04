@@ -8,6 +8,8 @@
 (define agent-stream? #t)
 (define agent-thinking #f)
 (define agent-max-tool-rounds 6)
+(define agent-compaction-threshold 80)
+(define agent-compaction-keep-recent 24)
 
 (define agent-system-prompt
   (string-append
