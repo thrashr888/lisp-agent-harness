@@ -16,6 +16,7 @@
             make-message
             make-tool-result-message
             make-ollama-request
+            make-openai-request
             parse-completion-response
             parse-ollama-response
             provider-complete))
@@ -502,12 +503,13 @@
         (parse-ollama-response
          (curl-post-json endpoint api-key payload)))))
 
-(define (provider-complete-openai model base-url api-key messages tool-names)
+(define (make-openai-request model messages tool-names prompt-cache-key)
   (let* ((tool-values (map tool-schema tool-names))
          (base-fields
           (list
            (cons "model" model)
-           (cons "messages" (apply json-array messages))))
+           (cons "messages" (apply json-array messages))
+           (cons "prompt_cache_key" prompt-cache-key)))
          (fields
           (if (null? tool-values)
               base-fields
@@ -515,19 +517,29 @@
                       (list
                        (cons "tools" (apply json-array tool-values))
                        (cons "parallel_tool_calls" #f)))))
-         (payload (json-write (apply json-object fields)))
+         (payload (apply json-object fields)))
+    payload))
+
+(define (provider-complete-openai model base-url api-key messages tool-names
+                                  prompt-cache-key)
+  (let* ((payload
+          (json-write
+           (make-openai-request
+            model messages tool-names prompt-cache-key)))
          (endpoint
           (string-append (without-trailing-slash base-url) "/chat/completions")))
     (parse-completion-response
      (curl-post-json endpoint api-key payload))))
 
 (define (provider-complete provider model base-url api-key messages tool-names
-                           stream? thinking keep-alive on-content on-thinking)
+                           stream? thinking keep-alive prompt-cache-key
+                           on-content on-thinking)
   (case provider
     ((ollama)
      (provider-complete-ollama
       model base-url api-key messages tool-names stream? thinking keep-alive
       on-content on-thinking))
     ((openai)
-     (provider-complete-openai model base-url api-key messages tool-names))
+     (provider-complete-openai
+      model base-url api-key messages tool-names prompt-cache-key))
     (else (error "unsupported provider" provider))))

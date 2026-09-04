@@ -61,4 +61,17 @@
   '()
   (generation-call generation 'agent-select-context "hello"))
 
+(define gateway-generation
+  (build-generation
+   2 source-path (read-source-file source-path)
+   (list (read-source-file "extensions/openai-gateway.scm"))))
+
+(test-equal "checked-in gateway extension selects OpenAI"
+  '(openai "gpt-5.4-mini" "OPENAI_API_KEY" #f)
+  (list
+   (generation-ref gateway-generation 'agent-provider)
+   (generation-ref gateway-generation 'agent-model)
+   (generation-ref gateway-generation 'agent-api-key-environment)
+   (generation-ref gateway-generation 'agent-stream?)))
+
 (test-end "default agent")

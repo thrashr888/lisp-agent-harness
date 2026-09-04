@@ -40,6 +40,11 @@ cache boundary between those cohorts rather than expose mutation authority on
 an ordinary turn. A live generation change and a compaction checkpoint are also
 intentional boundaries.
 
+OpenAI requests also carry a stable `prompt_cache_key` derived from the live
+generation fingerprint and safety cohort. It stays consistent across resumed
+sessions with the same prompt/tool image, while a behavior change deliberately
+routes to a new cache lineage.
+
 The Ollama request sends `agent-keep-alive` as `keep_alive`; the default is ten
 minutes. This reduces cold reloads during interactive work without holding a
 large model forever. Users can change it transactionally.
@@ -51,12 +56,15 @@ Every LLM span records:
 - `prompt.cache.dynamic_context_chars`
 - `prompt.cache.tool_count`
 - prompt/output token counts
+- OpenAI cached-input, cache-write, and reasoning token counts when returned
 - Ollama load, prompt-evaluation, generation, and total durations
 
-Ollama does not return a direct cached-token count here, so cache reuse is a
-hypothesis to validate from repeated-request prompt-evaluation time, not a
-success claim. Backend, model type, eviction, model switching, daemon restarts,
-and memory pressure may all change the result.
+OpenAI cache reuse is read directly from
+`usage.prompt_tokens_details.cached_tokens`. Ollama does not return an equivalent
+cached-token count here, so its reuse remains a hypothesis to validate from
+repeated-request prompt-evaluation time, not a success claim. Backend, model
+type, eviction, model switching, daemon restarts, and memory pressure may all
+change the result.
 
 ## What Tardigrade changes in the longer-term design
 

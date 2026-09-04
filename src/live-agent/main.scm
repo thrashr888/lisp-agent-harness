@@ -990,12 +990,35 @@
               (json-object-ref openai-usage "completion_tokens" #f)
               (and (json-object? root)
                    (json-object-ref root "eval_count" #f))))
+         (prompt-details
+          (and openai-usage
+               (json-object? openai-usage)
+               (json-object-ref openai-usage "prompt_tokens_details" #f)))
+         (completion-details
+          (and openai-usage
+               (json-object? openai-usage)
+               (json-object-ref openai-usage "completion_tokens_details" #f)))
+         (cached
+          (and prompt-details
+               (json-object? prompt-details)
+               (json-object-ref prompt-details "cached_tokens" #f)))
+         (cache-write
+          (and prompt-details
+               (json-object? prompt-details)
+               (json-object-ref prompt-details "cache_write_tokens" #f)))
+         (reasoning
+          (and completion-details
+               (json-object? completion-details)
+               (json-object-ref completion-details "reasoning_tokens" #f)))
          (metric
           (lambda (name)
             (and (json-object? root) (json-object-ref root name #f)))))
     (append
      (if prompt `((llm.token_count.prompt . ,prompt)) '())
      (if output `((llm.token_count.completion . ,output)) '())
+     (if cached `((llm.token_count.prompt_cached . ,cached)) '())
+     (if cache-write `((llm.token_count.prompt_cache_write . ,cache-write)) '())
+     (if reasoning `((llm.token_count.reasoning . ,reasoning)) '())
      (if (metric "total_duration")
          `((llm.total_duration_ns . ,(metric "total_duration"))) '())
      (if (metric "load_duration")
@@ -1012,7 +1035,7 @@
 
 (define (complete-with-trace tracer parent generation-id provider model base-url
                              api-key messages enabled-tools stream? thinking
-                             keep-alive round
+                             keep-alive prompt-cache-key round
                              prompt-attributes)
   (let ((span
          (trace-start!
@@ -1045,7 +1068,8 @@
         (let ((completion
                (provider-complete
                 provider model base-url api-key messages enabled-tools
-                stream? thinking keep-alive on-content on-thinking)))
+                stream? thinking keep-alive prompt-cache-key
+                on-content on-thinking)))
           (when (or thinking-started? content-started?)
             (newline)
             (force-output))
@@ -1110,9 +1134,15 @@
                  context-text)))))
          (user-message (make-message "user" transformed-line))
          (cache-prefix (append (list system) history))
+         (cache-cohort
+          (if (explicit-live-change-request? line) "mutation" "normal"))
+         (prompt-cache-key
+          (string-append
+           "shift-" (generation-fingerprint generation) "-" cache-cohort))
          (prompt-attributes
           `((prompt.cache.cohort
-             . ,(if (explicit-live-change-request? line) "mutation" "normal"))
+             . ,cache-cohort)
+            (prompt.cache.key . ,prompt-cache-key)
             (prompt.cache.prefix_messages
              . ,(prompt-cache-prefix-count history))
             (prompt.cache.prefix_chars
@@ -1128,7 +1158,7 @@
               (complete-with-trace
                tracer parent (generation-id generation)
                provider model base-url api-key messages
-               enabled-tools stream? thinking keep-alive round
+               enabled-tools stream? thinking keep-alive prompt-cache-key round
                prompt-attributes))
              (completion (car outcome))
              (content-streamed? (cdr outcome))
@@ -1182,7 +1212,10 @@
                   "success without a recorded tool result. Return only the compact summary."))
                 (make-message
                  "user" (json-write (apply json-array prefix))))
-               '() #f #f keep-alive (lambda _ #t) (lambda _ #t))))
+               '() #f #f keep-alive
+               (string-append
+                "shift-" (generation-fingerprint generation) "-compaction")
+               (lambda _ #t) (lambda _ #t))))
         (let ((summary (or (completion-content completion) "")))
           (when (string-null? (string-trim-both summary))
             (error "compaction model returned an empty summary"))

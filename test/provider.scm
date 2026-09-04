@@ -42,6 +42,22 @@
    (tool-call-arguments (car (completion-tool-calls ollama-completion)))
    "path"))
 
+(define openai-usage-completion
+  (parse-completion-response
+   (string-append
+    "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],"
+    "\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":9,"
+    "\"prompt_tokens_details\":{\"cached_tokens\":1024,\"cache_write_tokens\":0},"
+    "\"completion_tokens_details\":{\"reasoning_tokens\":4}}}")))
+
+(test-equal "retains OpenAI usage details for cache tracing"
+  1024
+  (json-object-ref
+   (json-object-ref
+    (json-object-ref (completion-usage openai-usage-completion) "usage")
+    "prompt_tokens_details")
+   "cached_tokens"))
+
 (define thinking-off-request
   (make-ollama-request
    "fixture" (list (make-message "user" "hello")) '() #t #f "10m"))
@@ -71,5 +87,16 @@
   8
   (length
    (json-array-items (json-object-ref coding-tools-request "tools"))))
+
+(define openai-request
+  (make-openai-request
+   "gpt-5.4-mini"
+   (list (make-message "user" "hello"))
+   '("read")
+   "shift-fixture-normal"))
+
+(test-equal "serializes a stable OpenAI prompt cache key"
+  "shift-fixture-normal"
+  (json-object-ref openai-request "prompt_cache_key"))
 
 (test-end "provider")

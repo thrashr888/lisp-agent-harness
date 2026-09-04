@@ -220,6 +220,23 @@ Set the environment variable before launching the process. The generic
 OpenAI-compatible adapter is currently non-streaming. To exercise live
 generations without any model, set `agent-model` to `"demo"`.
 
+For OpenAI specifically, copy `.env.example` to the ignored `.env`, then export
+it into the process and load the checked-in disabled extension:
+
+```sh
+set -a; source .env; set +a
+./bin/shift --session openai
+```
+
+```text
+/extension-load openai-gateway
+```
+
+That extension selects `gpt-5.4-mini` at `https://api.openai.com/v1` without
+changing the repository's Ollama default. The session checkpoint retains the
+selection after restart; the environment still has to contain
+`OPENAI_API_KEY`. Never commit `.env`.
+
 The model can call `read`, `rg`, `write`, `edit`, `shell`, `traces`,
 `live_eval`, and `extension`. The `traces` tool searches the complete local
 trace file while retaining only a bounded set of current-session hits. Hits are
