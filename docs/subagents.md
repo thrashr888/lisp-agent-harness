@@ -1,6 +1,7 @@
 # Fork the live image: a subagent direction for shift
 
-Status: design proposal, not an implemented orchestration API.
+Status: smallest credible milestone implemented; parallel fan-out remains future
+work.
 
 The interesting move is not merely to let an agent spawn another chat. `shift`
 can fork both conversation state and a validated behavior generation. A child
@@ -8,7 +9,7 @@ can then experiment with a prompt, context selector, model route, or extension
 inside an isolated branch and return an inspectable artifact rather than
 silently changing the parent.
 
-## Proposed child-run contract
+## Child-run contract
 
 A spawn captures this immutable envelope:
 
@@ -58,18 +59,50 @@ record before mutating work. Raw traces should remain out of the prompt;
 subagents exchange compact summaries and stable references, then use the trace
 tool for bounded inspection.
 
-## Smallest credible milestone
+## Implemented milestone
 
-1. Add `session-fork PARENT CHILD` that copies a checkpoint and pins the same
-   generation fingerprint.
-2. Add `subagent.run` and `subagent.join` spans with explicit trace links.
-3. Add one supervisor tool that starts a child with a narrower tool list,
-   waits or cancels it, and returns only the structured envelope above.
-4. Let the child export a disabled extension proposal; require a parent/user
-   action to load it.
-5. Evaluate baseline versus child with the same fixed checkpoint and a
-   deterministic tool-result assertion.
+1. `./bin/shift session-fork PARENT CHILD` atomically copies the bounded
+   checkpoint into a distinct session identity, preserves the generation and
+   fingerprint, and copies any durable authority ceiling.
+2. The MCP bridge records `subagent.fanout`, `subagent.run`, and `subagent.join`
+   spans. Run and join scopes contain explicit links rather than pretending the
+   causal graph is a single sequential call stack.
+3. `live_subagent_run` starts one child with a required, narrower tool list,
+   waits up to its budget, cancels on timeout by default, and returns the
+   structured envelope above. Its process receives `SHIFT_TOOL_CEILING`; the
+   same ceiling is stored outside the live image in `authority.json`, survives
+   resume, and cannot be widened by `live_eval`.
+4. A child can return its child-only patches as a named, disabled extension via
+   `proposal_name`. The supervisor stores it under the ignored child session
+   state, never writes it into the project's extension directory, and never
+   loads it in the parent. Promotion remains an explicit user or parent action.
+5. The integration suite forks baseline and candidate children from the same
+   checkpoint, loads a candidate extension only in the latter, and requires the
+   same deterministic tool name and output evidence from both.
 
-Only then add parallel fan-out. Without isolated checkpoints, cancellation,
-write-ahead recovery, and causal trace identity, “subagents” would mostly be
-interleaved processes and optimistic text summaries.
+Example supervisor request:
+
+```json
+{
+  "parent_session": "dogfood",
+  "child_session": "selector-candidate",
+  "task": "Use read to verify the selected runbook.",
+  "tools": ["read", "traces"],
+  "extension": "candidate-selector",
+  "assert_tool": "read",
+  "assert_output_contains": "production ingress",
+  "proposal_name": "verified-selector"
+}
+```
+
+The child has isolated conversation, generation, recovery, trace, and authority
+state. Supervised runs accept only `read`, `rg`, `traces`, and `live_eval`;
+`write`, `edit`, `shell`, and extension-management tools are excluded. The child
+still shares the project filesystem, so a future workspace-fork layer should
+precede concurrent mutating children. Supervisor fan-out/run/join spans are
+local JSONL in this milestone; ordinary provider and turn spans keep using the
+configured OTLP export.
+
+Parallel fan-out is intentionally not included yet. The next step is scheduling
+multiple children and joining them without weakening checkpoint isolation,
+cancellation, write-ahead recovery, or causal trace identity.

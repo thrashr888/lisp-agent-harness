@@ -57,6 +57,8 @@ Every LLM span records:
 - `prompt.cache.tool_count`
 - prompt/output token counts
 - OpenAI cached-input, cache-write, and reasoning token counts when returned
+- `llm.prompt_cache.status` (`hit` or `miss`) and `llm.prompt_cache.hit`
+- uncached prompt tokens, so a partial hit is visible rather than binary only
 - Ollama load, prompt-evaluation, generation, and total durations
 
 OpenAI cache reuse is read directly from
@@ -65,6 +67,12 @@ cached-token count here, so its reuse remains a hypothesis to validate from
 repeated-request prompt-evaluation time, not a success claim. Backend, model
 type, eviction, model switching, daemon restarts, and memory pressure may all
 change the result.
+
+In the live OpenAI smoke, the first long-prefix request reported
+`cache=miss (0 tokens)` and the second reported `cache=hit (1280 tokens)`.
+The hit span contained 1,753 prompt tokens: 1,280 cached and 473 uncached. This
+is an observed example, not a guarantee for shorter prompts or a different
+backend/cache window.
 
 ## What Tardigrade changes in the longer-term design
 

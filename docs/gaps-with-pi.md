@@ -13,8 +13,8 @@ observability. The useful comparison is therefore asymmetric.
 | Gap | Why it matters |
 | --- | --- |
 | Coding workflow depth | `read`, `rg`, atomic `write`, exact `edit`, and turn cancellation cover the basic loop, but there is no structured process tool, patch hunks, diagnostics integration, background jobs, or rich diff review. |
-| Session lifecycle depth | Named conversations now resume, compact, cancel, and expose explicit interrupted-tool recovery, but sessions cannot yet branch, fork, export, or share. Recovery repeats a whole tool call; it does not resume inside a process. |
-| Provider breadth | Native Ollama plus a basic non-streaming OpenAI-compatible path is far behind Pi’s provider catalog, authentication, model switching, retries, and multimodal handling. |
+| Session lifecycle depth | Named conversations now resume, compact, cancel, fork fixed checkpoints, and expose explicit interrupted-tool recovery, but there is no share/export workflow or exact mid-process continuation. |
+| Provider breadth | Native Ollama plus streaming OpenAI Chat Completions is still far behind Pi’s provider catalog, authentication, model switching, retries, and multimodal handling. |
 | Terminal product | There is no rich TUI, multiline editor, tool-call renderer, queueing, keybindings, themes, settings UI, or model picker. |
 | Extension ecosystem | Named Scheme artifacts can now be created, listed, loaded, disabled, and exported, but there are no skills, prompt templates, dependencies, package registry, lifecycle/event API, custom UI, signatures, or compatibility metadata. |
 | Embedding modes | There is no print/JSON mode, RPC protocol, SDK, web UI, or supported library boundary. |
@@ -41,7 +41,7 @@ documentation.
 | Stable capability ceiling | Pi explicitly has no built-in permission system; extensions run with the user process’s permissions. Here the live image cannot widen shell policy beyond `ask`, and file reads cross a stable project-root boundary. This is promising, not yet a security proof. |
 | Generation-attributed diagnosis | Pi has a vendor-neutral telemetry contract, but it deliberately ships without an exporter. It also has no equivalent code-generation identity to correlate a changed function with before/after answers. This harness records the selector, selected paths, generation, result, and tool/LLM tree locally and in Phoenix. |
 | Direct behavior patching by the model | Pi can ask the model to edit an extension and can arrange a follow-up reload, but the documented reload flow keeps the running handler in its old call frame. Here `live_eval` validates and activates a single function change for the next turn without rewriting a source file. |
-| Built-in subagents and plan mode | Pi deliberately omits these and expects packages to add them. This harness also lacks them; `docs/subagents.md` proposes generation-pinned child sessions, but it is not an implementation advantage today. |
+| Built-in subagents and plan mode | Pi deliberately omits these and expects packages to add them. This harness now has one generation-pinned supervised child with linked traces and a durable narrower authority ceiling, but not parallel fan-out, isolated workspaces, or a plan-mode product. |
 
 Sources: Pi’s
 [`extension reload semantics`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md),

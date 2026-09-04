@@ -21,6 +21,26 @@
 
 (define turn-active? #f)
 
+(define supported-tool-names
+  '("read" "rg" "write" "edit" "shell" "traces" "live_eval" "extension"))
+
+;; A process-level ceiling is intentionally outside the live image. A child can
+;; redefine agent-tools, but it cannot grant itself authority omitted here.
+(define process-tool-ceiling
+  (let ((raw (getenv "SHIFT_TOOL_CEILING")))
+    (if (or (not raw) (string-null? (string-trim-both raw)))
+        #f
+        (let ((names
+               (filter
+                (lambda (name) (not (string-null? name)))
+                (map string-trim-both (string-split raw #\,)))))
+          (unless (every (lambda (name) (member name supported-tool-names)) names)
+            (error "SHIFT_TOOL_CEILING contains an unsupported tool" raw))
+          (delete-duplicates names string=?)))))
+
+(define (within-process-tool-ceiling? name)
+  (or (not process-tool-ceiling) (member name process-tool-ceiling)))
+
 (define (cancelled? key)
   (eq? key 'turn-cancelled))
 
@@ -35,28 +55,29 @@
    (string-append
     "Usage: shift [--agent PATH] [--state-dir PATH] [--watch|--no-watch]\n"
     "                  [--session NAME|--new-session NAME|--resume NAME] [PROMPT]\n"
-    "       shift --list-sessions [--state-dir PATH]\n")))
+    "       shift --list-sessions [--state-dir PATH]\n"
+    "       shift session-fork PARENT CHILD\n")))
 
 (define (parse-arguments args)
   (let loop ((rest args) (agent #f) (state-dir #f) (watch? #t)
              (session-name #f) (session-mode #f) (list? #f)
-             (initial-prompt #f))
+             (initial-prompt #f) (fork-parent #f) (fork-child #f))
     (cond
      ((null? rest)
       (values agent state-dir watch? session-name session-mode list?
-              initial-prompt))
+              initial-prompt fork-parent fork-child))
      ((and (pair? (cdr rest)) (string=? (car rest) "--agent"))
       (loop (cddr rest) (cadr rest) state-dir watch?
-            session-name session-mode list? initial-prompt))
+            session-name session-mode list? initial-prompt fork-parent fork-child))
      ((and (pair? (cdr rest)) (string=? (car rest) "--state-dir"))
       (loop (cddr rest) agent (cadr rest) watch?
-            session-name session-mode list? initial-prompt))
+            session-name session-mode list? initial-prompt fork-parent fork-child))
      ((string=? (car rest) "--watch")
       (loop (cdr rest) agent state-dir #t session-name session-mode list?
-            initial-prompt))
+            initial-prompt fork-parent fork-child))
      ((string=? (car rest) "--no-watch")
       (loop (cdr rest) agent state-dir #f session-name session-mode list?
-            initial-prompt))
+            initial-prompt fork-parent fork-child))
      ((and (pair? (cdr rest))
            (member (car rest) '("--session" "--new-session" "--resume")))
       (when session-name
@@ -67,11 +88,19 @@
        (cond
         ((string=? (car rest) "--new-session") 'new)
         ((string=? (car rest) "--resume") 'resume)
-        (else 'auto))
-       list? initial-prompt))
+       (else 'auto))
+       list? initial-prompt fork-parent fork-child))
+     ((and (pair? (cdr rest)) (pair? (cddr rest))
+           (string=? (car rest) "--fork-session"))
+      (when (or fork-parent session-name list? initial-prompt)
+        (format (current-error-port)
+                "session-fork cannot be combined with a session selector, listing, or prompt.\n")
+        (exit 2))
+      (loop (cdddr rest) agent state-dir watch? session-name session-mode list?
+            initial-prompt (cadr rest) (caddr rest)))
      ((string=? (car rest) "--list-sessions")
       (loop (cdr rest) agent state-dir watch?
-            session-name session-mode #t initial-prompt))
+            session-name session-mode #t initial-prompt fork-parent fork-child))
      ((member (car rest) '("-h" "--help"))
       (usage)
       (exit 0))
@@ -81,7 +110,7 @@
                 "Only one positional startup prompt may be provided; quote prompts containing spaces.\n")
         (exit 2))
       (loop (cdr rest) agent state-dir watch?
-            session-name session-mode list? (car rest)))
+            session-name session-mode list? (car rest) fork-parent fork-child))
      (else
       (format (current-error-port) "Unknown argument: ~a~%" (car rest))
       (usage)
@@ -260,7 +289,7 @@
            (lambda (span)
              (if span-id
                  (begin (display (json-write span)) (newline))
-                 (format #t "~6,1f ms  gen=~a turn=~a  ~a  ~a  ~a  span=~a~a~%"
+                 (format #t "~6,1f ms  gen=~a turn=~a  ~a  ~a  ~a  span=~a~a~a~%"
                          (json-object-ref span "duration_ms")
                          (json-object-ref span "generation" "-")
                          (json-object-ref span "turn" "-")
@@ -268,6 +297,13 @@
                          (json-object-ref span "name")
                          (json-object-ref span "status")
                          (json-object-ref span "span_id")
+                         (let ((cache
+                                (json-object-ref span "cache_status" json-null)))
+                           (if (eq? cache json-null)
+                               ""
+                               (format
+                                #f "  cache=~a (~a tokens)" cache
+                                (json-object-ref span "cached_tokens" 0))))
                          (let ((preview (json-object-ref span "preview" "")))
                            (if (and (string? preview)
                                     (not (string-null? preview)))
@@ -653,7 +689,9 @@
                (name (json-object-ref pending "tool"))
                (arguments (json-object-ref pending "arguments"))
                (enabled
-                (map tool-name (generation-ref generation 'agent-tools))))
+                (filter
+                 within-process-tool-ceiling?
+                 (map tool-name (generation-ref generation 'agent-tools)))))
           (unless (member name enabled)
             (error "the interrupted tool is no longer enabled" name))
           (when (member name '("live_eval" "extension"))
@@ -863,6 +901,11 @@
             (error
              "agent-select-context must return at most eight non-empty paths"
              paths))
+          (when (and (pair? paths)
+                     (not (within-process-tool-ceiling? "read")))
+            (error
+             "context selection requires read authority, which this process ceiling omits"
+             paths))
           (let* ((sections
                   (map
                    (lambda (path)
@@ -1010,6 +1053,11 @@
           (and completion-details
                (json-object? completion-details)
                (json-object-ref completion-details "reasoning_tokens" #f)))
+         (cache-hit?
+          (and (number? cached) (> cached 0)))
+         (uncached
+          (and (number? prompt) (number? cached)
+               (max 0 (- prompt cached))))
          (metric
           (lambda (name)
             (and (json-object? root) (json-object-ref root name #f)))))
@@ -1017,6 +1065,11 @@
      (if prompt `((llm.token_count.prompt . ,prompt)) '())
      (if output `((llm.token_count.completion . ,output)) '())
      (if cached `((llm.token_count.prompt_cached . ,cached)) '())
+     (if (number? cached)
+         `((llm.prompt_cache.hit . ,cache-hit?)
+           (llm.prompt_cache.status . ,(if cache-hit? "hit" "miss")))
+         '())
+     (if uncached `((llm.token_count.prompt_uncached . ,uncached)) '())
      (if cache-write `((llm.token_count.prompt_cache_write . ,cache-write)) '())
      (if reasoning `((llm.token_count.reasoning . ,reasoning)) '())
      (if (metric "total_duration")
@@ -1104,8 +1157,10 @@
          (enabled-tools
           (filter
            (lambda (name)
-             (or (not (member name '("live_eval" "write" "edit")))
-                 (explicit-live-change-request? line)))
+             (and
+              (within-process-tool-ceiling? name)
+              (or (not (member name '("live_eval" "write" "edit")))
+                  (explicit-live-change-request? line))))
            configured-tools))
          (max-rounds
           (generation-ref generation 'agent-max-tool-rounds))
@@ -1140,7 +1195,8 @@
           (string-append
            "shift-" (generation-fingerprint generation) "-" cache-cohort))
          (prompt-attributes
-          `((prompt.cache.cohort
+          `((turn.number . ,turn-count)
+            (prompt.cache.cohort
              . ,cache-cohort)
             (prompt.cache.key . ,prompt-cache-key)
             (prompt.cache.prefix_messages
@@ -1378,10 +1434,25 @@
   (call-with-values
       (lambda () (parse-arguments args))
     (lambda (agent-path state-directory watch? requested-session-name session-mode
-             list? initial-prompt)
+             list? initial-prompt fork-parent fork-child)
       (unless (and agent-path state-directory)
         (usage)
         (exit 2))
+      (when fork-parent
+        (let ((forked
+               (try-transition
+                "session fork"
+                (lambda ()
+                  (fork-session!
+                   state-directory fork-parent fork-child)))))
+          (unless forked (exit 1))
+          (format #t
+                  "forked session ~a -> ~a · generation ~a · ~a · turn ~a~%"
+                  fork-parent fork-child
+                  (json-object-ref forked "generation_id")
+                  (json-object-ref forked "fingerprint")
+                  (json-object-ref forked "next_turn")))
+        (exit 0))
       (when list?
         (let ((names (list-session-names state-directory)))
           (if (null? names)

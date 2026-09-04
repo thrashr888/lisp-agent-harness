@@ -1,6 +1,7 @@
 (define-module (live-agent provider)
   #:use-module (ice-9 popen)
   #:use-module (ice-9 textual-ports)
+  #:use-module (srfi srfi-13)
   #:use-module (srfi srfi-9)
   #:use-module (live-agent json)
   #:export (tool-call?
@@ -503,33 +504,132 @@
         (parse-ollama-response
          (curl-post-json endpoint api-key payload)))))
 
-(define (make-openai-request model messages tool-names prompt-cache-key)
+(define* (make-openai-request model messages tool-names prompt-cache-key
+                              #:optional (stream? #f))
   (let* ((tool-values (map tool-schema tool-names))
          (base-fields
           (list
            (cons "model" model)
            (cons "messages" (apply json-array messages))
-           (cons "prompt_cache_key" prompt-cache-key)))
+           (cons "prompt_cache_key" prompt-cache-key)
+           (cons "stream" stream?)))
          (fields
-          (if (null? tool-values)
-              base-fields
-              (append base-fields
-                      (list
-                       (cons "tools" (apply json-array tool-values))
-                       (cons "parallel_tool_calls" #f)))))
+          (append
+           base-fields
+           (if stream?
+               (list
+                (cons "stream_options"
+                      (json-object (cons "include_usage" #t))))
+               '())
+           (if (null? tool-values)
+               '()
+               (list
+                (cons "tools" (apply json-array tool-values))
+                (cons "parallel_tool_calls" #f)))))
          (payload (apply json-object fields)))
     payload))
 
 (define (provider-complete-openai model base-url api-key messages tool-names
-                                  prompt-cache-key)
+                                  prompt-cache-key stream? on-content)
   (let* ((payload
           (json-write
            (make-openai-request
-            model messages tool-names prompt-cache-key)))
+            model messages tool-names prompt-cache-key stream?)))
          (endpoint
           (string-append (without-trailing-slash base-url) "/chat/completions")))
-    (parse-completion-response
-     (curl-post-json endpoint api-key payload))))
+    (if (not stream?)
+        (parse-completion-response
+         (curl-post-json endpoint api-key payload))
+        (let ((content-port (open-output-string))
+              (call-states '())
+              (usage (json-object)))
+          (define (call-state index)
+            (let ((found (assoc index call-states)))
+              (if found
+                  (cdr found)
+                  (let ((state (vector "" "" "")))
+                    (set! call-states (cons (cons index state) call-states))
+                    state))))
+          (define (append-field! state offset value)
+            (when (and (string? value) (not (string-null? value)))
+              (vector-set!
+               state offset (string-append (vector-ref state offset) value))))
+          (curl-post-json-lines
+           endpoint api-key payload
+           (lambda (line)
+             (when (string-prefix? "data:" line)
+               (let ((data (string-trim-both (substring line 5))))
+                 (unless (or (string-null? data) (string=? data "[DONE]"))
+                   (let* ((root (json-read data))
+                          (provider-error (json-object-ref root "error" #f))
+                          (usage-value (json-object-ref root "usage" #f)))
+                     (when provider-error
+                       (error
+                        "provider returned an error"
+                        (if (json-object? provider-error)
+                            (json-object-ref
+                             provider-error "message" provider-error)
+                            provider-error)))
+                     (when (json-object? usage-value)
+                       (set! usage root))
+                     (for-each
+                      (lambda (choice)
+                        (let* ((delta
+                                (json-object-ref choice "delta" (json-object)))
+                               (content (json-object-ref delta "content" #f)))
+                          (when (string? content)
+                            (display content content-port)
+                            (on-content content))
+                          (for-each
+                           (lambda (call-delta)
+                             (let* ((index
+                                     (json-object-ref call-delta "index" 0))
+                                    (state (call-state index))
+                                    (function
+                                     (json-object-ref
+                                      call-delta "function" (json-object))))
+                               (append-field!
+                                state 0 (json-object-ref call-delta "id" #f))
+                               (append-field!
+                                state 1 (json-object-ref function "name" #f))
+                               (append-field!
+                                state 2
+                                (json-object-ref function "arguments" #f))))
+                           (json-array-items
+                            (json-object-ref
+                             delta "tool_calls" (json-array))))))
+                      (json-array-items
+                       (json-object-ref root "choices" (json-array))))))))))
+          (let* ((content (get-output-string content-port))
+                 (calls
+                  (map
+                   (lambda (entry)
+                     (let ((state (cdr entry)))
+                       (parse-tool-call
+                        (json-object
+                         (cons "id" (vector-ref state 0))
+                         (cons "type" "function")
+                         (cons
+                          "function"
+                          (json-object
+                           (cons "name" (vector-ref state 1))
+                           (cons "arguments" (vector-ref state 2))))))))
+                   (sort call-states
+                         (lambda (left right) (< (car left) (car right))))))
+                 (assistant
+                  (apply
+                   json-object
+                   (append
+                    (list
+                     (cons "role" "assistant")
+                     (cons "content"
+                           (if (string-null? content) json-null content)))
+                    (if (null? calls)
+                        '()
+                        (list (cons "tool_calls" (tool-calls->json calls))))))))
+            (make-completion
+             (if (string-null? content) #f content)
+             #f calls assistant usage))))))
 
 (define (provider-complete provider model base-url api-key messages tool-names
                            stream? thinking keep-alive prompt-cache-key
@@ -541,5 +641,6 @@
       on-content on-thinking))
     ((openai)
      (provider-complete-openai
-      model base-url api-key messages tool-names prompt-cache-key))
+      model base-url api-key messages tool-names prompt-cache-key stream?
+      on-content))
     (else (error "unsupported provider" provider))))

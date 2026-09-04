@@ -11,6 +11,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,7 +69,12 @@ class SlowOllamaHandler(BaseHTTPRequestHandler):
         self.rfile.read(length)
         type(self).started.set()
         type(self).release.wait(10)
-        body = (json.dumps({"message": {"role": "assistant", "content": "late"}, "done": True}) + "\n").encode()
+        body = (
+            json.dumps(
+                {"message": {"role": "assistant", "content": "late"}, "done": True}
+            )
+            + "\n"
+        ).encode()
         try:
             self.send_response(200)
             self.send_header("content-type", "application/x-ndjson")
@@ -113,6 +119,98 @@ class TraceOllamaHandler(BaseHTTPRequestHandler):
         pass
 
 
+class OpenAIStreamingHandler(BaseHTTPRequestHandler):
+    calls = 0
+    requests = []
+
+    def _event(self, value):
+        self.wfile.write(f"data: {json.dumps(value)}\n\n".encode())
+        self.wfile.flush()
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length", "0"))
+        request = json.loads(self.rfile.read(length))
+        type(self).requests.append(request)
+        type(self).calls += 1
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        if type(self).calls % 2 == 1:
+            self._event(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_read",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read",
+                                            "arguments": '{"path":"',
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            )
+            self._event(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "function": {"arguments": 'README.md"}'},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                }
+            )
+        else:
+            self._event({"choices": [{"index": 0, "delta": {"content": "streamed "}}]})
+            self._event(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": "tool ok"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            )
+        self._event(
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 6000,
+                    "completion_tokens": 8,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 5120,
+                        "cache_write_tokens": 0,
+                    },
+                    "completion_tokens_details": {"reasoning_tokens": 3},
+                },
+            }
+        )
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+    def log_message(self, format, *args):
+        pass
+
+
 class McpBridgeTest(unittest.TestCase):
     def setUp(self):
         FakeOllamaHandler.calls = 0
@@ -139,7 +237,11 @@ class McpBridgeTest(unittest.TestCase):
         self.next_id = 1
         initialized = self.rpc(
             "initialize",
-            {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
         )
         self.assertEqual(initialized["protocolVersion"], "2025-06-18")
 
@@ -170,9 +272,7 @@ class McpBridgeTest(unittest.TestCase):
         return response["result"]
 
     def call(self, name, arguments=None):
-        result = self.rpc(
-            "tools/call", {"name": name, "arguments": arguments or {}}
-        )
+        result = self.rpc("tools/call", {"name": name, "arguments": arguments or {}})
         self.assertFalse(result.get("isError"), result)
         return json.loads(result["content"][0]["text"])
 
@@ -181,6 +281,8 @@ class McpBridgeTest(unittest.TestCase):
         self.assertIn("live_session_send", {tool["name"] for tool in tools})
         self.assertIn("live_session_cancel", {tool["name"] for tool in tools})
         self.assertIn("live_session_recovery", {tool["name"] for tool in tools})
+        self.assertIn("live_session_fork", {tool["name"] for tool in tools})
+        self.assertIn("live_subagent_run", {tool["name"] for tool in tools})
 
         started = self.call("live_session_start", {"agent": "test/session-agent.scm"})
         self.assertTrue(started["running"])
@@ -227,14 +329,10 @@ class McpBridgeTest(unittest.TestCase):
         self.assertIn("matches across", traces["output"])
         span_match = re.search(r"span=([0-9a-f]+)", traces["output"])
         self.assertIsNotNone(span_match)
-        exact_trace = self.call(
-            "live_session_traces", {"span_id": span_match.group(1)}
-        )
+        exact_trace = self.call("live_session_traces", {"span_id": span_match.group(1)})
         self.assertIn('"name":"session.compact"', exact_trace["output"])
 
-        setting = self.call(
-            "live_session_set", {"name": "thinking", "value": "on"}
-        )
+        setting = self.call("live_session_set", {"name": "thinking", "value": "on"})
         self.assertIn("thinking on", setting["output"])
 
         prompt = self.call("live_session_add_prompt", {"text": "Call me Paul."})
@@ -261,7 +359,8 @@ class McpBridgeTest(unittest.TestCase):
         self.assertIn("generation 4", shell_settings["output"])
 
         approval_boundary = self.call(
-            "live_session_send", {"text": "run the requested shell", "timeout_seconds": 10}
+            "live_session_send",
+            {"text": "run the requested shell", "timeout_seconds": 10},
         )
         self.assertEqual(approval_boundary["state"], "needs_approval")
         self.assertIn("printf approved", approval_boundary["output"])
@@ -379,7 +478,11 @@ class ExtensionToolMappingTest(unittest.TestCase):
         server.call_tool("live_extension", {"action": "list"})
         server.call_tool(
             "live_extension",
-            {"action": "create", "name": "terse", "expression": '(set! agent-system-prompt "Terse")'},
+            {
+                "action": "create",
+                "name": "terse",
+                "expression": '(set! agent-system-prompt "Terse")',
+            },
         )
         server.call_tool("live_extension", {"action": "load", "name": "terse"})
         server.call_tool("live_extension", {"action": "disable", "name": "terse"})
@@ -433,14 +536,14 @@ class HotReloadTest(unittest.TestCase):
             self.assertIn("[hot-reloaded] hello", response["output"])
 
             cursor = response["cursor"]
-            invalid = updated.replace("(define agent-name", "(define missing-agent-name")
+            invalid = updated.replace(
+                "(define agent-name", "(define missing-agent-name"
+            )
             agent_path.write_text(invalid)
             rejected_notice = self.wait_for_text(session, cursor, "change rejected")
             self.assertIn("generation 2 remains active", rejected_notice)
             time.sleep(0.6)
-            self.assertEqual(
-                session.read(cursor)["output"].count("change rejected"), 1
-            )
+            self.assertEqual(session.read(cursor)["output"].count("change rejected"), 1)
 
             response = session.send("still there", 5)
             self.assertIn("[hot-reloaded] still there", response["output"])
@@ -460,6 +563,210 @@ class HotReloadTest(unittest.TestCase):
         raise AssertionError(f"timed out waiting for {expected!r}; output={output!r}")
 
 
+class OpenAIStreamingTest(unittest.TestCase):
+    def test_sse_streams_tool_calls_and_marks_cache_hits(self):
+        OpenAIStreamingHandler.calls = 0
+        OpenAIStreamingHandler.requests = []
+        server = HTTPServer(("127.0.0.1", 0), OpenAIStreamingHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        project_root = Path(tempfile.mkdtemp(prefix="shift-openai-sse-test-"))
+        session = None
+        try:
+            (project_root / "bin").mkdir()
+            (project_root / "agent").mkdir()
+            (project_root / "extensions").mkdir()
+            (project_root / "src").symlink_to(ROOT / "src", target_is_directory=True)
+            shutil.copy2(ROOT / "bin/shift", project_root / "bin/shift")
+            (project_root / "README.md").write_text("# deterministic SSE fixture\n")
+            image = (ROOT / "test/session-agent.scm").read_text()
+            image = image.replace(
+                "(define agent-provider 'ollama)", "(define agent-provider 'openai)"
+            )
+            image = image.replace(
+                '(define agent-model "demo")', '(define agent-model "fake")'
+            )
+            image = image.replace(
+                '(define agent-base-url "http://127.0.0.1:11434")',
+                f'(define agent-base-url "http://127.0.0.1:{server.server_address[1]}")',
+            )
+            (project_root / "agent/default.scm").write_text(image)
+            session = LiveSession(project_root, project_root / ".shift")
+            self.assertEqual(session.start()["state"], "ready")
+
+            response = session.send("read the readme", 10)
+            self.assertEqual(response["state"], "ready")
+            self.assertIn("assistant> streamed tool ok", response["output"])
+            self.assertEqual(OpenAIStreamingHandler.calls, 2)
+            self.assertTrue(
+                all(request["stream"] for request in OpenAIStreamingHandler.requests)
+            )
+            self.assertTrue(
+                all(
+                    request["stream_options"]["include_usage"]
+                    for request in OpenAIStreamingHandler.requests
+                )
+            )
+
+            trace_output = session.send("/traces llm.prompt_cache.status", 5)["output"]
+            self.assertIn("cache=hit (5120 tokens)", trace_output)
+            traces = (project_root / ".shift/sessions/default/traces.jsonl").read_text()
+            self.assertIn('"llm.prompt_cache.hit":true', traces)
+            self.assertIn('"llm.token_count.prompt_uncached":880', traces)
+        finally:
+            if session is not None:
+                session.stop()
+            server.shutdown()
+            server.server_close()
+            shutil.rmtree(project_root, ignore_errors=True)
+
+
+class SubagentMilestoneTest(unittest.TestCase):
+    def test_forked_children_compare_from_one_checkpoint_with_linked_traces(self):
+        OpenAIStreamingHandler.calls = 0
+        OpenAIStreamingHandler.requests = []
+        provider = HTTPServer(("127.0.0.1", 0), OpenAIStreamingHandler)
+        threading.Thread(target=provider.serve_forever, daemon=True).start()
+        project_root = Path(tempfile.mkdtemp(prefix="shift-subagent-test-"))
+        bridge = None
+        resumed_child = None
+        try:
+            (project_root / "bin").mkdir()
+            (project_root / "agent").mkdir()
+            (project_root / "extensions").mkdir()
+            (project_root / "src").symlink_to(ROOT / "src", target_is_directory=True)
+            shutil.copy2(ROOT / "bin/shift", project_root / "bin/shift")
+            (project_root / "README.md").write_text(
+                "# deterministic subagent evidence\n"
+            )
+            (project_root / "extensions/candidate.scm").write_text(
+                '(set! agent-system-prompt "candidate generation")\n'
+            )
+            image = (ROOT / "test/session-agent.scm").read_text()
+            image = image.replace(
+                "(define agent-provider 'ollama)", "(define agent-provider 'openai)"
+            )
+            image = image.replace(
+                '(define agent-model "demo")', '(define agent-model "fake")'
+            )
+            image = image.replace(
+                '(define agent-base-url "http://127.0.0.1:11434")',
+                f'(define agent-base-url "http://127.0.0.1:{provider.server_address[1]}")',
+            )
+            (project_root / "agent/default.scm").write_text(image)
+            state_root = project_root / ".shift"
+            bridge = McpServer(project_root, state_root)
+            started = json.loads(
+                bridge.call_tool(
+                    "live_session_start",
+                    {
+                        "session": "parent",
+                        "mode": "new",
+                        "agent": "agent/default.scm",
+                    },
+                )["content"][0]["text"]
+            )
+            self.assertEqual(started["state"], "ready")
+
+            with self.assertRaisesRegex(ValueError, "read, rg, traces, or live_eval"):
+                bridge.call_tool(
+                    "live_subagent_run",
+                    {
+                        "parent_session": "parent",
+                        "child_session": "too-wide",
+                        "task": "try shell",
+                        "tools": ["shell"],
+                    },
+                )
+
+            with self.assertRaisesRegex(ValueError, "subset"):
+                bridge.call_tool(
+                    "live_subagent_run",
+                    {
+                        "parent_session": "parent",
+                        "child_session": "not-in-parent",
+                        "task": "inspect traces",
+                        "tools": ["traces"],
+                    },
+                )
+
+            def run_child(name, extension=None):
+                arguments = {
+                    "parent_session": "parent",
+                    "child_session": name,
+                    "task": "read the readme and report success",
+                    "tools": ["read"],
+                    "agent": "agent/default.scm",
+                    "assert_tool": "read",
+                    "assert_output_contains": "deterministic subagent evidence",
+                }
+                if extension:
+                    arguments["extension"] = extension
+                    arguments["proposal_name"] = "candidate-proposal"
+                result = bridge.call_tool("live_subagent_run", arguments)
+                return json.loads(result["content"][0]["text"])
+
+            baseline = run_child("baseline")
+            candidate = run_child("candidate", "candidate")
+            self.assertTrue(baseline["assertion"]["passed"])
+            self.assertTrue(candidate["assertion"]["passed"])
+            self.assertEqual(
+                baseline["generation_ref"]["parent_fingerprint"],
+                candidate["generation_ref"]["parent_fingerprint"],
+            )
+            self.assertEqual(
+                baseline["generation_ref"]["parent_fingerprint"],
+                baseline["generation_ref"]["child_fingerprint"],
+            )
+            self.assertNotEqual(
+                candidate["generation_ref"]["parent_fingerprint"],
+                candidate["generation_ref"]["child_fingerprint"],
+            )
+            self.assertEqual(candidate["extension_proposal"]["status"], "exported")
+            self.assertFalse(candidate["extension_proposal"]["loaded"])
+            self.assertTrue(
+                (
+                    state_root / "sessions/candidate/proposals/candidate-proposal.scm"
+                ).is_file()
+            )
+            self.assertFalse(
+                (project_root / "extensions/candidate-proposal.scm").exists()
+            )
+            self.assertEqual(
+                json.loads(
+                    (state_root / "sessions/candidate/authority.json").read_text()
+                )["tool_ceiling"],
+                ["read"],
+            )
+            parent_traces = (state_root / "sessions/parent/traces.jsonl").read_text()
+            child_traces = (state_root / "sessions/candidate/traces.jsonl").read_text()
+            self.assertIn('"name":"subagent.fanout"', parent_traces)
+            self.assertIn('"name":"subagent.join"', parent_traces)
+            self.assertIn('"name":"subagent.run"', child_traces)
+            self.assertIn('"links":[', child_traces)
+
+            resumed_child = LiveSession(project_root, state_root, "candidate")
+            resumed = resumed_child.start("agent/default.scm", "resume")
+            self.assertEqual(resumed["tool_ceiling"], ["read"])
+            resumed_child.send("/eval (set! agent-tools '(shell))", 5)
+            request_start = len(OpenAIStreamingHandler.requests)
+            widened = resumed_child.send("try the newly configured tool", 10)
+            self.assertEqual(widened["state"], "ready")
+            self.assertTrue(
+                all(
+                    "tools" not in request
+                    for request in OpenAIStreamingHandler.requests[request_start:]
+                )
+            )
+        finally:
+            if resumed_child is not None:
+                resumed_child.stop()
+            if bridge is not None:
+                bridge.close()
+            provider.shutdown()
+            provider.server_close()
+            shutil.rmtree(project_root, ignore_errors=True)
+
+
 class CancellationTest(unittest.TestCase):
     def test_cancellation_interrupts_provider_and_preserves_the_prompt(self):
         SlowOllamaHandler.started.clear()
@@ -476,12 +783,16 @@ class CancellationTest(unittest.TestCase):
             (project_root / "src").symlink_to(ROOT / "src", target_is_directory=True)
             shutil.copy2(ROOT / "bin/shift", project_root / "bin/shift")
             image = (ROOT / "test/session-agent.scm").read_text()
-            image = image.replace('(define agent-model "demo")', '(define agent-model "fake")')
+            image = image.replace(
+                '(define agent-model "demo")', '(define agent-model "fake")'
+            )
             image = image.replace(
                 '(define agent-base-url "http://127.0.0.1:11434")',
                 f'(define agent-base-url "http://127.0.0.1:{server.server_address[1]}")',
             )
-            image = image.replace("(define agent-tools '(read rg))", "(define agent-tools '())")
+            image = image.replace(
+                "(define agent-tools '(read rg))", "(define agent-tools '())"
+            )
             (project_root / "agent/default.scm").write_text(image)
             session = LiveSession(project_root, project_root / ".shift")
             self.assertEqual(session.start()["state"], "ready")
@@ -524,12 +835,16 @@ class TraceToolTest(unittest.TestCase):
             (project_root / "src").symlink_to(ROOT / "src", target_is_directory=True)
             shutil.copy2(ROOT / "bin/shift", project_root / "bin/shift")
             image = (ROOT / "test/session-agent.scm").read_text()
-            image = image.replace('(define agent-model "demo")', '(define agent-model "fake")')
+            image = image.replace(
+                '(define agent-model "demo")', '(define agent-model "fake")'
+            )
             image = image.replace(
                 '(define agent-base-url "http://127.0.0.1:11434")',
                 f'(define agent-base-url "http://127.0.0.1:{server.server_address[1]}")',
             )
-            image = image.replace("(define agent-tools '(read rg))", "(define agent-tools '(traces))")
+            image = image.replace(
+                "(define agent-tools '(read rg))", "(define agent-tools '(traces))"
+            )
             (project_root / "agent/default.scm").write_text(image)
             session = LiveSession(project_root, project_root / ".shift")
             self.assertEqual(session.start()["state"], "ready")
@@ -540,7 +855,9 @@ class TraceToolTest(unittest.TestCase):
                 (project_root / ".shift/sessions/default/session.json").read_text()
             )
             tool_messages = [
-                message for message in checkpoint["history"] if message.get("role") == "tool"
+                message
+                for message in checkpoint["history"]
+                if message.get("role") == "tool"
             ]
             self.assertTrue(tool_messages)
             self.assertIn('"session_id"', tool_messages[0]["content"])
@@ -554,6 +871,7 @@ class TraceToolTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             shutil.rmtree(project_root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

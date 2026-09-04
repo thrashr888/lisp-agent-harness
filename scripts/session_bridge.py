@@ -22,9 +22,72 @@ PROMPT = "shift> "
 APPROVAL_PROMPT = "Approve this command? [y/N] "
 MAX_TRANSCRIPT_CHARS = 2 * 1024 * 1024
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
+EXTENSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+SUPPORTED_TOOLS = {
+    "read",
+    "rg",
+    "write",
+    "edit",
+    "shell",
+    "traces",
+    "live_eval",
+    "extension",
+}
+SUBAGENT_TOOLS = {"read", "rg", "traces", "live_eval"}
 
 
-def object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
+def fresh_hex(byte_count: int) -> str:
+    return os.urandom(byte_count).hex()
+
+
+def append_trace_span(
+    state_dir: Path,
+    checkpoint: dict[str, Any],
+    *,
+    trace_id: str,
+    span_id: str,
+    parent_span_id: str | None,
+    name: str,
+    kind: str,
+    start_ns: int,
+    status: str,
+    attributes: dict[str, Any],
+    links: list[dict[str, Any]] | None = None,
+) -> None:
+    end_ns = time.time_ns()
+    value: dict[str, Any] = {
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "parent_span_id": parent_span_id,
+        "name": name,
+        "kind": kind,
+        "start_time_unix_nano": start_ns,
+        "end_time_unix_nano": end_ns,
+        "duration_ms": round((end_ns - start_ns) / 1_000_000, 3),
+        "status": status,
+        "attributes": {
+            "openinference.span.kind": kind,
+            "session.id": checkpoint["id"],
+            "session.name": checkpoint["name"],
+            **attributes,
+        },
+    }
+    if links:
+        value["links"] = links
+    state_dir.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(value, separators=(",", ":")) + "\n").encode()
+    descriptor = os.open(
+        state_dir / "traces.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+    )
+    try:
+        os.write(descriptor, encoded)
+    finally:
+        os.close(descriptor)
+
+
+def object_schema(
+    properties: dict[str, Any], required: list[str] | None = None
+) -> dict[str, Any]:
     return {
         "type": "object",
         "properties": properties,
@@ -58,7 +121,10 @@ TOOLS = [
         "description": "Start or resume one named MCP-owned shift session.",
         "inputSchema": session_schema(
             {
-                "agent": {"type": "string", "description": "Optional project-relative agent image path."},
+                "agent": {
+                    "type": "string",
+                    "description": "Optional project-relative agent image path.",
+                },
                 "prompt": {
                     "type": "string",
                     "description": "Optional first user turn to run immediately after startup.",
@@ -69,6 +135,61 @@ TOOLS = [
                     "description": "Auto resumes or creates; new and resume are strict.",
                 },
             }
+        ),
+    },
+    {
+        "name": "live_session_fork",
+        "description": (
+            "Fork one durable checkpoint into an isolated child with the same "
+            "generation fingerprint and a distinct session identity."
+        ),
+        "inputSchema": object_schema(
+            {
+                "parent_session": SESSION_PROPERTY,
+                "child_session": SESSION_PROPERTY,
+            },
+            ["parent_session", "child_session"],
+        ),
+    },
+    {
+        "name": "live_subagent_run",
+        "description": (
+            "Fork a parent checkpoint, run one isolated child under a narrower "
+            "process-level tool ceiling, wait or cancel it, and return a structured "
+            "result with trajectory, trace, generation, proposal, and assertion refs."
+        ),
+        "inputSchema": object_schema(
+            {
+                "parent_session": SESSION_PROPERTY,
+                "child_session": SESSION_PROPERTY,
+                "task": {"type": "string"},
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(SUBAGENT_TOOLS)},
+                    "minItems": 1,
+                    "uniqueItems": True,
+                    "description": "Stable child authority ceiling; it cannot widen this live.",
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Optional project-relative agent image path.",
+                },
+                "extension": {
+                    "type": "string",
+                    "description": "Optional disabled extension to evaluate only in the child.",
+                },
+                "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
+                "proposal_name": {
+                    "type": "string",
+                    "description": "Export child-only live patches as a disabled extension.",
+                },
+                "assert_tool": {
+                    "type": "string",
+                    "enum": sorted(SUPPORTED_TOOLS),
+                },
+                "assert_output_contains": {"type": "string"},
+            },
+            ["parent_session", "child_session", "task", "tools"],
         ),
     },
     {
@@ -94,9 +215,7 @@ TOOLS = [
     {
         "name": "live_session_read",
         "description": "Read transcript output at or after an optional absolute cursor.",
-        "inputSchema": session_schema(
-            {"cursor": {"type": "integer", "minimum": 0}}
-        ),
+        "inputSchema": session_schema({"cursor": {"type": "integer", "minimum": 0}}),
         "annotations": {"readOnlyHint": True},
     },
     {
@@ -171,9 +290,7 @@ TOOLS = [
     {
         "name": "live_session_add_prompt",
         "description": "Append text to the live system prompt transactionally for later turns.",
-        "inputSchema": session_schema(
-            {"text": {"type": "string"}}, ["text"]
-        ),
+        "inputSchema": session_schema({"text": {"type": "string"}}, ["text"]),
     },
     {
         "name": "live_session_eval",
@@ -206,7 +323,9 @@ TOOLS = [
 
 
 class LiveSession:
-    def __init__(self, project_root: Path, state_root: Path, name: str = "default") -> None:
+    def __init__(
+        self, project_root: Path, state_root: Path, name: str = "default"
+    ) -> None:
         if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
             raise ValueError("session names must match [A-Za-z0-9][A-Za-z0-9._-]*")
         self.project_root = project_root.resolve()
@@ -220,6 +339,40 @@ class LiveSession:
         self._condition = threading.Condition()
         self._command_lock = threading.Lock()
         self._busy = False
+        self.tool_ceiling: tuple[str, ...] | None = None
+
+    def _authority_ceiling(self) -> tuple[str, ...] | None:
+        path = self.state_dir / "authority.json"
+        try:
+            value = json.loads(path.read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"invalid session authority record: {path}") from error
+        if not isinstance(value, dict):
+            raise RuntimeError(f"invalid session authority record: {path}")
+        tools = value.get("tool_ceiling")
+        if (
+            value.get("version") != 1
+            or not isinstance(tools, list)
+            or not tools
+            or any(
+                not isinstance(tool, str) or tool not in SUPPORTED_TOOLS
+                for tool in tools
+            )
+        ):
+            raise RuntimeError(f"invalid session authority record: {path}")
+        return tuple(dict.fromkeys(tools))
+
+    def _save_authority_ceiling(self, ceiling: tuple[str, ...]) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.state_dir / "authority.json"
+        temporary = self.state_dir / f".authority-{os.getpid()}-{fresh_hex(4)}.tmp"
+        temporary.write_text(
+            json.dumps({"version": 1, "tool_ceiling": list(ceiling)}, indent=2) + "\n"
+        )
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
 
     def _running(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -255,7 +408,9 @@ class LiveSession:
         except ValueError as error:
             raise ValueError("agent path escapes the project root") from error
         if not candidate.is_file():
-            raise ValueError(f"agent image does not exist: {requested or 'agent/default.scm'}")
+            raise ValueError(
+                f"agent image does not exist: {requested or 'agent/default.scm'}"
+            )
         return candidate
 
     def _segment(self, cursor: int) -> str:
@@ -295,7 +450,9 @@ class LiveSession:
 
     def _write(self, value: bytes) -> None:
         if not self._running() or self.master_fd is None:
-            raise RuntimeError("live session is not running; call live_session_start first")
+            raise RuntimeError(
+                "live session is not running; call live_session_start first"
+            )
         os.write(self.master_fd, value)
 
     def _awaiting_approval(self) -> bool:
@@ -307,15 +464,46 @@ class LiveSession:
         agent: str | None = None,
         mode: str = "auto",
         initial_prompt: str | None = None,
+        tool_ceiling: list[str] | None = None,
     ) -> dict[str, Any]:
         if initial_prompt is not None and (
             not isinstance(initial_prompt, str) or not initial_prompt.strip()
         ):
             raise ValueError("prompt must be a non-empty string")
+        stored_ceiling = self._authority_ceiling()
+        if tool_ceiling is not None:
+            if (
+                not isinstance(tool_ceiling, list)
+                or not tool_ceiling
+                or any(tool not in SUPPORTED_TOOLS for tool in tool_ceiling)
+            ):
+                raise ValueError(
+                    "tools must be a non-empty list of supported tool names"
+                )
+            normalized_ceiling = tuple(dict.fromkeys(tool_ceiling))
+            if stored_ceiling is not None and not set(normalized_ceiling).issubset(
+                stored_ceiling
+            ):
+                raise ValueError(
+                    "requested tools exceed the durable session authority ceiling"
+                )
+        else:
+            normalized_ceiling = stored_ceiling
         if self._running():
+            if (
+                normalized_ceiling is not None
+                and normalized_ceiling != self.tool_ceiling
+            ):
+                raise RuntimeError(
+                    "running session has a different process tool ceiling"
+                )
             if initial_prompt is not None:
                 return self.send(initial_prompt)
-            return {**self.status(), "state": "ready", "output": "Session already running."}
+            return {
+                **self.status(),
+                "state": "ready",
+                "output": "Session already running.",
+            }
         if mode not in {"auto", "new", "resume"}:
             raise ValueError("mode must be auto, new, or resume")
         image = self._resolve_agent(agent)
@@ -332,6 +520,10 @@ class LiveSession:
         termios.tcsetattr(slave_fd, termios.TCSANOW, terminal_attributes)
         environment = os.environ.copy()
         environment.setdefault("TERM", "dumb")
+        if normalized_ceiling is not None:
+            environment["SHIFT_TOOL_CEILING"] = ",".join(normalized_ceiling)
+        else:
+            environment.pop("SHIFT_TOOL_CEILING", None)
         command = [
             str(self.project_root / "bin/shift"),
             "--agent",
@@ -358,12 +550,16 @@ class LiveSession:
             os.close(slave_fd)
         self.process = process
         self.master_fd = master_fd
+        self.tool_ceiling = normalized_ceiling
+        if normalized_ceiling is not None and normalized_ceiling != stored_ceiling:
+            self._save_authority_ceiling(normalized_ceiling)
         threading.Thread(target=self._reader, args=(master_fd,), daemon=True).start()
         result = self._wait_for_boundary(marker, 15)
         result.update(self.status())
         return result
 
     def status(self) -> dict[str, Any]:
+        effective_ceiling = self.tool_ceiling or self._authority_ceiling()
         result = {
             "session": self.name,
             "running": self._running(),
@@ -372,6 +568,7 @@ class LiveSession:
             "state_dir": str(self.state_dir),
             "resumable": (self.state_dir / "session.json").is_file(),
             "recovery_pending": (self.state_dir / "interrupted-tool.json").is_file(),
+            "tool_ceiling": list(effective_ceiling) if effective_ceiling else None,
         }
         try:
             checkpoint = json.loads((self.state_dir / "session.json").read_text())
@@ -379,6 +576,7 @@ class LiveSession:
                 {
                     "session_id": checkpoint.get("id"),
                     "generation": checkpoint.get("generation_id"),
+                    "fingerprint": checkpoint.get("fingerprint"),
                     "next_turn": checkpoint.get("next_turn"),
                 }
             )
@@ -390,7 +588,9 @@ class LiveSession:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
         if self._awaiting_approval():
-            raise RuntimeError("a shell request is waiting; approve or deny it before sending input")
+            raise RuntimeError(
+                "a shell request is waiting; approve or deny it before sending input"
+            )
         with self._command_lock:
             marker = self._cursor()
             with self._condition:
@@ -448,7 +648,11 @@ class LiveSession:
                 except OSError:
                     pass
                 self.master_fd = None
-            return {**self.status(), "state": "stopped", "output": "Session is not running."}
+            return {
+                **self.status(),
+                "state": "stopped",
+                "output": "Session is not running.",
+            }
         assert self.process is not None
         try:
             self._write(b"/quit\n")
@@ -481,7 +685,9 @@ def scheme_string(value: str) -> str:
 
 
 class McpServer:
-    def __init__(self, project_root: Path, state_root: Path, session_factory=LiveSession) -> None:
+    def __init__(
+        self, project_root: Path, state_root: Path, session_factory=LiveSession
+    ) -> None:
         self.project_root = project_root.resolve()
         self.state_root = state_root.resolve()
         self.session_factory = session_factory
@@ -514,7 +720,346 @@ class McpServer:
                 if SAFE_NAME.fullmatch(path.parent.name)
             )
         return {
-            "sessions": [self._session({"session": name}).status() for name in sorted(names)]
+            "sessions": [
+                self._session({"session": name}).status() for name in sorted(names)
+            ]
+        }
+
+    def _checkpoint(self, name: str) -> dict[str, Any]:
+        if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
+            raise ValueError("session names must match [A-Za-z0-9][A-Za-z0-9._-]*")
+        path = self.state_root / "sessions" / name / "session.json"
+        try:
+            checkpoint = json.loads(path.read_text())
+        except FileNotFoundError as error:
+            raise ValueError(f"session does not exist: {name}") from error
+        if checkpoint.get("name") != name or not checkpoint.get("fingerprint"):
+            raise ValueError(f"invalid session checkpoint: {name}")
+        return checkpoint
+
+    def _fork_session(self, parent_name: str, child_name: str) -> dict[str, Any]:
+        if not isinstance(parent_name, str) or not SAFE_NAME.fullmatch(parent_name):
+            raise ValueError("invalid parent session name")
+        if not isinstance(child_name, str) or not SAFE_NAME.fullmatch(child_name):
+            raise ValueError("invalid child session name")
+        command = [
+            str(self.project_root / "bin/shift"),
+            "session-fork",
+            parent_name,
+            child_name,
+            "--state-dir",
+            str(self.state_root),
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=self.project_root,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise RuntimeError(detail or "session fork failed")
+        return self._checkpoint(child_name)
+
+    def _checkpoint_agent(self, checkpoint: dict[str, Any]) -> str | None:
+        source = checkpoint.get("source")
+        if not isinstance(source, str) or not source:
+            return None
+        source_path = Path(source).resolve()
+        try:
+            return str(source_path.relative_to(self.project_root))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _tool_assertion(
+        checkpoint: dict[str, Any],
+        tool_name: str | None,
+        output_fragment: str | None,
+        history_start: int,
+    ) -> dict[str, Any] | None:
+        if tool_name is None and output_fragment is None:
+            return None
+        history = checkpoint.get("history") or []
+        for index in range(history_start, len(history)):
+            message = history[index]
+            if message.get("role") != "tool":
+                continue
+            actual_name = message.get("tool_name")
+            call_id = message.get("tool_call_id")
+            if actual_name is None and call_id:
+                for earlier in reversed(history[:index]):
+                    for call in earlier.get("tool_calls") or []:
+                        if call.get("id") == call_id:
+                            actual_name = (call.get("function") or {}).get("name")
+                            break
+                    if actual_name is not None:
+                        break
+            content = message.get("content")
+            name_matches = tool_name is None or actual_name == tool_name
+            output_matches = output_fragment is None or (
+                isinstance(content, str) and output_fragment in content
+            )
+            if name_matches and output_matches:
+                return {
+                    "passed": True,
+                    "tool": actual_name,
+                    "history_index": index,
+                    "tool_call_id": call_id,
+                    "output_contains": output_fragment,
+                }
+        return {
+            "passed": False,
+            "tool": tool_name,
+            "output_contains": output_fragment,
+        }
+
+    def _export_proposal(
+        self,
+        name: str | None,
+        parent_checkpoint: dict[str, Any],
+        child_checkpoint: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if name is None:
+            return None
+        if not isinstance(name, str) or not EXTENSION_NAME.fullmatch(name):
+            raise ValueError(
+                "proposal name must be 1-64 letters, numbers, hyphens, or underscores"
+            )
+        parent_patches = parent_checkpoint.get("patches") or []
+        child_patches = child_checkpoint.get("patches") or []
+        if child_patches[: len(parent_patches)] != parent_patches:
+            raise RuntimeError("child patch lineage diverged from its fork checkpoint")
+        child_only = child_patches[len(parent_patches) :]
+        if not child_only:
+            return {"name": name, "status": "empty", "loaded": False}
+        proposal_directory = (
+            self.state_root / "sessions" / child_checkpoint["name"] / "proposals"
+        )
+        proposal_directory.mkdir(parents=True, exist_ok=True)
+        extension_path = proposal_directory / f"{name}.scm"
+        content = (
+            f";; Live Agent extension: {name}\n"
+            ";; Disabled proposal exported from an isolated subagent.\n\n"
+            + "\n\n".join(child_only)
+            + "\n"
+        )
+        try:
+            with extension_path.open("x") as port:
+                port.write(content)
+        except FileExistsError as error:
+            raise ValueError(f"extension already exists: {name}") from error
+        return {
+            "name": name,
+            "status": "exported",
+            "path": str(extension_path),
+            "patch_count": len(child_only),
+            "loaded": False,
+        }
+
+    def _run_subagent(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        parent_name = arguments.get("parent_session")
+        child_name = arguments.get("child_session")
+        task = arguments.get("task")
+        tools = arguments.get("tools")
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("task must be a non-empty string")
+        if (
+            not isinstance(tools, list)
+            or not tools
+            or any(
+                not isinstance(tool, str) or tool not in SUBAGENT_TOOLS
+                for tool in tools
+            )
+        ):
+            raise ValueError(
+                "subagent tools must be a non-empty list of read, rg, traces, or live_eval"
+            )
+        tools = list(dict.fromkeys(tools))
+        timeout = float(arguments.get("timeout_seconds", 180))
+        if not 1 <= timeout <= 600:
+            raise ValueError("timeout_seconds must be from 1 through 600")
+        parent_checkpoint = self._checkpoint(parent_name)
+        parent_tools = parent_checkpoint.get("tools")
+        if not isinstance(parent_tools, list) or any(
+            not isinstance(tool, str) for tool in parent_tools
+        ):
+            raise RuntimeError(
+                "parent checkpoint predates tool ceilings; resume it once before forking"
+            )
+        if not set(tools).issubset(parent_tools):
+            raise ValueError(
+                "child tools must be a subset of the parent generation tools"
+            )
+        fanout_start = time.time_ns()
+        parent_trace_id = fresh_hex(16)
+        fanout_span_id = fresh_hex(8)
+        run_trace_id = fresh_hex(16)
+        run_span_id = fresh_hex(8)
+        join_span_id = fresh_hex(8)
+        child_checkpoint = self._fork_session(parent_name, child_name)
+        child = self._session({"session": child_name})
+        requested_agent = arguments.get("agent") or self._checkpoint_agent(
+            parent_checkpoint
+        )
+        started = child.start(
+            requested_agent,
+            "resume",
+            tool_ceiling=tools,
+        )
+        if started.get("state") != "ready":
+            raise RuntimeError(f"child failed to start: {started.get('state')}")
+        if started.get("fingerprint") != parent_checkpoint.get("fingerprint"):
+            child.stop()
+            raise RuntimeError(
+                "parent generation changed before child start; fork again from a fresh checkpoint"
+            )
+        extension_name = arguments.get("extension")
+        if extension_name is not None:
+            if not isinstance(extension_name, str) or not EXTENSION_NAME.fullmatch(
+                extension_name
+            ):
+                child.stop()
+                raise ValueError("extension must be a safe extension artifact name")
+            extension_result = child.send(f"/extension-load {extension_name}", 15)
+            if extension_result.get("state") != "ready":
+                child.stop()
+                raise RuntimeError(f"child extension failed to load: {extension_name}")
+
+        run_start = time.time_ns()
+        outcome: dict[str, Any] = {}
+        failure: list[Exception] = []
+
+        def run_turn() -> None:
+            try:
+                outcome.update(child.send(task, timeout + 30))
+            except Exception as error:  # Preserve a structured join on child failure.
+                failure.append(error)
+
+        worker = threading.Thread(target=run_turn, daemon=True)
+        worker.start()
+        worker.join(timeout)
+        cancelled = False
+        if worker.is_alive():
+            cancellation = child.cancel(15)
+            cancelled = True
+            worker.join(15)
+            outcome = {**outcome, **cancellation}
+        if failure:
+            child.stop()
+            raise failure[0]
+
+        child_checkpoint = self._checkpoint(child_name)
+        assertion = self._tool_assertion(
+            child_checkpoint,
+            arguments.get("assert_tool"),
+            arguments.get("assert_output_contains"),
+            len(parent_checkpoint.get("history") or []),
+        )
+        proposal = self._export_proposal(
+            arguments.get("proposal_name"), parent_checkpoint, child_checkpoint
+        )
+        assertion_failed = assertion is not None and not assertion.get("passed")
+        status = (
+            "CANCELLED"
+            if cancelled
+            else (
+                "OK"
+                if outcome.get("state") == "ready" and not assertion_failed
+                else "ERROR"
+            )
+        )
+        output = outcome.get("output") or ""
+        result_text = output[-16_384:]
+
+        append_trace_span(
+            child.state_dir,
+            child_checkpoint,
+            trace_id=run_trace_id,
+            span_id=run_span_id,
+            parent_span_id=None,
+            name="subagent.run",
+            kind="AGENT",
+            start_ns=run_start,
+            status=status,
+            attributes={
+                "subagent.parent_session": parent_name,
+                "subagent.child_session": child_name,
+                "subagent.task": task,
+                "subagent.tool_ceiling": tools,
+                "subagent.extension": extension_name,
+                "subagent.cancelled": cancelled,
+                "generation.id": child_checkpoint["generation_id"],
+                "generation.fingerprint": child_checkpoint["fingerprint"],
+                "output.value": result_text,
+            },
+            links=[{"trace_id": parent_trace_id, "span_id": fanout_span_id}],
+        )
+        append_trace_span(
+            self.state_root / "sessions" / parent_name,
+            parent_checkpoint,
+            trace_id=parent_trace_id,
+            span_id=fanout_span_id,
+            parent_span_id=None,
+            name="subagent.fanout",
+            kind="AGENT",
+            start_ns=fanout_start,
+            status=status,
+            attributes={
+                "subagent.child_session": child_name,
+                "subagent.task": task,
+                "subagent.tool_ceiling": tools,
+                "subagent.extension": extension_name,
+                "generation.id": parent_checkpoint["generation_id"],
+                "generation.fingerprint": parent_checkpoint["fingerprint"],
+            },
+        )
+        join_start = time.time_ns()
+        append_trace_span(
+            self.state_root / "sessions" / parent_name,
+            parent_checkpoint,
+            trace_id=parent_trace_id,
+            span_id=join_span_id,
+            parent_span_id=fanout_span_id,
+            name="subagent.join",
+            kind="AGENT",
+            start_ns=join_start,
+            status=status,
+            attributes={
+                "subagent.child_session": child_name,
+                "subagent.assertion_passed": (
+                    assertion.get("passed") if assertion is not None else None
+                ),
+                "subagent.cancelled": cancelled,
+            },
+            links=[{"trace_id": run_trace_id, "span_id": run_span_id}],
+        )
+
+        if outcome.get("state") == "ready":
+            child.stop()
+        return {
+            "result": result_text,
+            "state": outcome.get("state"),
+            "trajectory_ref": str(child.state_dir / "session.json"),
+            "trace_ref": {
+                "parent_trace_id": parent_trace_id,
+                "fanout_span_id": fanout_span_id,
+                "child_trace_id": run_trace_id,
+                "run_span_id": run_span_id,
+                "join_span_id": join_span_id,
+            },
+            "generation_ref": {
+                "parent_generation": parent_checkpoint["generation_id"],
+                "parent_fingerprint": parent_checkpoint["fingerprint"],
+                "child_generation": child_checkpoint["generation_id"],
+                "child_fingerprint": child_checkpoint["fingerprint"],
+            },
+            "extension_proposal": proposal,
+            "assertion": assertion,
+            "cancelled": cancelled,
         }
 
     def _run_command(
@@ -526,6 +1071,27 @@ class McpServer:
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "live_sessions_list":
             result = self._list_sessions()
+            return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+        if name == "live_session_fork":
+            checkpoint = self._fork_session(
+                arguments.get("parent_session"), arguments.get("child_session")
+            )
+            result = {
+                "session": checkpoint["name"],
+                "session_id": checkpoint["id"],
+                "next_turn": checkpoint["next_turn"],
+                "generation": checkpoint["generation_id"],
+                "fingerprint": checkpoint["fingerprint"],
+                "fork": checkpoint.get("fork"),
+                "trajectory_ref": str(
+                    self.state_root / "sessions" / checkpoint["name"] / "session.json"
+                ),
+            }
+            return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+        if name == "live_subagent_run":
+            result = self._run_subagent(arguments)
             return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
         session = self._session(arguments)
@@ -578,7 +1144,13 @@ class McpServer:
         elif name == "live_session_set":
             setting = arguments.get("name")
             value = arguments.get("value")
-            if setting == "thinking" and value in {"off", "on", "low", "medium", "high"}:
+            if setting == "thinking" and value in {
+                "off",
+                "on",
+                "low",
+                "medium",
+                "high",
+            }:
                 result = self._run_command(session, f"/thinking {value}", arguments)
             elif setting == "stream" and value in {"off", "on"}:
                 result = self._run_command(session, f"/stream {value}", arguments)
@@ -644,7 +1216,9 @@ class McpServer:
         elif method == "tools/call":
             params = request.get("params", {})
             try:
-                result = self.call_tool(params.get("name", ""), params.get("arguments") or {})
+                result = self.call_tool(
+                    params.get("name", ""), params.get("arguments") or {}
+                )
             except Exception as error:  # MCP tools report operational failures in-band.
                 result = {
                     "content": [{"type": "text", "text": str(error)}],
@@ -670,7 +1244,9 @@ def main() -> int:
     parser.add_argument("--state-dir")
     options = parser.parse_args()
     project_root = Path(__file__).resolve().parents[1]
-    state_dir = Path(options.state_dir) if options.state_dir else project_root / ".shift"
+    state_dir = (
+        Path(options.state_dir) if options.state_dir else project_root / ".shift"
+    )
     server = McpServer(project_root, state_dir)
     output_lock = threading.Lock()
     workers: list[threading.Thread] = []

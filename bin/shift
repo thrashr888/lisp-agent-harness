@@ -11,6 +11,11 @@ if [ ! -e "$state_root" ] && [ -d "$project_root/.lisp-agent" ]; then
   state_root="$project_root/.lisp-agent"
 fi
 
+if [ "${1-}" = "session-fork" ]; then
+  shift
+  set -- --fork-session "$@"
+fi
+
 exec guile \
   --no-auto-compile \
   -L "$project_root/src" \

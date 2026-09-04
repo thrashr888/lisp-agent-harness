@@ -99,4 +99,19 @@
   "shift-fixture-normal"
   (json-object-ref openai-request "prompt_cache_key"))
 
+(define openai-stream-request
+  (make-openai-request
+   "gpt-5.4-mini"
+   (list (make-message "user" "hello"))
+   '("read")
+   "shift-fixture-normal"
+   #t))
+
+(test-assert "requests OpenAI SSE with a final usage chunk"
+  (and
+   (json-object-ref openai-stream-request "stream")
+   (json-object-ref
+    (json-object-ref openai-stream-request "stream_options")
+    "include_usage")))
+
 (test-end "provider")

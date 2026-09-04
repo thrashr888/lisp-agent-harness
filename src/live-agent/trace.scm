@@ -224,6 +224,11 @@
      (cons "generation"
            (json-object-ref attributes "generation.id" json-null))
      (cons "turn" (json-object-ref attributes "turn.number" json-null))
+     (cons "cache_status"
+           (json-object-ref attributes "llm.prompt_cache.status" json-null))
+     (cons "cached_tokens"
+           (json-object-ref attributes
+                            "llm.token_count.prompt_cached" json-null))
      (cons "preview" (trace-preview attributes)))))
 
 ;; Scan the complete append-only trace file while retaining only a bounded set

@@ -102,4 +102,45 @@
 
 (close-session! resumed)
 
+(call-with-output-file
+    (string-append (session-directory state) "/authority.json")
+  (lambda (port)
+    (display "{\"version\":1,\"tool_ceiling\":[\"read\"]}\n" port)))
+
+(define forked-checkpoint
+  (fork-session! test-root "dogfood" "dogfood-child"))
+
+(test-equal "session fork preserves the checkpoint turn"
+  2
+  (json-object-ref forked-checkpoint "next_turn"))
+(test-equal "session fork pins the parent generation fingerprint"
+  (json-object-ref forked-checkpoint "fingerprint")
+  (json-object-ref
+   (json-object-ref forked-checkpoint "fork") "fingerprint"))
+(test-equal "session fork snapshots the parent tool list"
+  '("read")
+  (json-array-items (json-object-ref forked-checkpoint "tools")))
+
+(define forked (open-session! test-root "dogfood-child" 'resume))
+
+(test-assert "session fork receives a distinct durable identity"
+  (not (string=? (session-id state) (session-id forked))))
+(test-equal "session fork inherits bounded conversation history"
+  "hi"
+  (json-object-ref (cadr (session-history forked)) "content"))
+(test-equal "session fork preserves the durable authority ceiling"
+  "read"
+  (car
+   (json-array-items
+    (json-object-ref
+     (json-read
+      (read-source-file
+       (string-append (session-directory forked) "/authority.json")))
+     "tool_ceiling"))))
+
+(close-session! forked)
+(test-error "session fork refuses to overwrite a child"
+  #t
+  (fork-session! test-root "dogfood" "dogfood-child"))
+
 (test-end "durable session")

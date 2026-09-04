@@ -38,13 +38,15 @@ granting the inner model authority to accept its own runtime changes.
 - There is no first-class diff, patch-hunk, git-status, diagnostics, or test tool;
   those actions currently fall back to approval-gated shell.
 - Long sessions now compact into a traced summary and can search pre-compaction
-  trace evidence, but there is no token-budget policy, summary-quality evaluator,
-  lossless event-sourced trajectory, or branch/fork model.
+  trace evidence, and checkpoints can fork into generation-pinned children, but
+  there is no token-budget policy, summary-quality evaluator, lossless
+  event-sourced trajectory, or isolated workspace branch.
 - Interrupted tools leave an explicit write-ahead record with manual
   retry/discard. There is no exact mid-process continuation or deterministic
   replay, so a mutating retry may still be ambiguous.
-- Turns can be cancelled, but there is no background job model, provider retry,
-  model fallback, or concurrent tool execution.
+- A supervisor can wait for or cancel one child, but there is no general
+  background job model, provider retry, model fallback, parallel fan-out, or
+  concurrent tool execution.
 - Stable-runtime upgrades need the versioned supervisor/handoff described in
   `docs/live-updates.md`; only the user-owned live image updates in process.
 - The Scheme evaluator and filesystem confinement need deeper adversarial tests,

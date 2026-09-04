@@ -75,6 +75,7 @@ process restart:
 ./bin/shift --new-session spike-2   # fail if the name already exists
 ./bin/shift --resume dogfood        # fail if it does not exist
 ./bin/shift --list-sessions
+./bin/shift session-fork dogfood experiment
 ```
 
 The checkpoint at `.shift/sessions/NAME/session.json` is atomically
@@ -92,6 +93,8 @@ older in-memory generations do not. Checkpoints are bounded at 8 MiB and 2,000
 messages; large artifacts belong in files with references in the conversation.
 An advisory owner lock prevents two processes from opening and overwriting the
 same named session concurrently; different names remain fully concurrent.
+`session-fork` copies a fixed checkpoint into a distinct child identity while
+preserving its generation fingerprint and durable authority ceiling.
 
 Older history compacts automatically after 80 provider messages, retaining at
 least 24 recent messages and a boundary-safe summary. Both values are live
@@ -217,8 +220,8 @@ name of the environment variable holding its credential:
 ```
 
 Set the environment variable before launching the process. The generic
-OpenAI-compatible adapter is currently non-streaming. To exercise live
-generations without any model, set `agent-model` to `"demo"`.
+OpenAI-compatible requests support SSE streaming and streamed function calls.
+To exercise live generations without any model, set `agent-model` to `"demo"`.
 
 For OpenAI specifically, copy `.env.example` to the ignored `.env`, then export
 it into the process and load the checked-in disabled extension:
@@ -236,6 +239,10 @@ That extension selects `gpt-5.4-mini` at `https://api.openai.com/v1` without
 changing the repository's Ollama default. The session checkpoint retains the
 selection after restart; the environment still has to contain
 `OPENAI_API_KEY`. Never commit `.env`.
+
+OpenAI cache outcomes are explicit in completed LLM spans: search traces for
+`llm.prompt_cache.status` or inspect the compact `cache=hit|miss` annotation.
+The trace also records cached and uncached prompt-token counts.
 
 The model can call `read`, `rg`, `write`, `edit`, `shell`, `traces`,
 `live_eval`, and `extension`. The `traces` tool searches the complete local
@@ -267,6 +274,8 @@ through typed tools:
 - set thinking or streaming and apply restricted live Scheme expressions
 - append system-prompt guidance for later turns
 - list, create, load, disable, and export extensions
+- fork a fixed checkpoint and supervise one generation-attributed child under a
+  durable, narrower tool ceiling
 
 Each name maps to an independent child process and durable checkpoint. The
 bridge launches the same `bin/shift` under a pseudo-terminal, so it
@@ -301,7 +310,7 @@ Run the MCP server directly for protocol debugging with:
 Every completed turn writes OpenInference-shaped `AGENT`, `LLM`, and `TOOL`
 spans to `.shift/traces.jsonl`. They include hierarchy, generation and turn
 IDs, model name, bounded inputs/outputs/thinking, duration, status, and Ollama
-token counts. This is separate from the append-only audit journal at
+or OpenAI token/cache counts. This is separate from the append-only audit journal at
 `.shift/events.scm-log`.
 
 Enter `/traces` for a quick local summary, `/traces deployment` to search all
@@ -342,6 +351,10 @@ cache boundary. LLM spans record the cohort, reusable-prefix size, dynamic
 context size, tool count, token counts, and Ollama load/prompt/generation
 durations. See [durability and prompt-cache strategy](docs/durability-and-prompt-cache.md).
 
+OpenAI spans additionally expose an explicit `cache=hit|miss` summary plus
+cached and uncached token counts. OpenAI requests stream content and fragmented
+function calls over SSE and request the final usage chunk.
+
 To inspect Phoenix logs or stop the container without deleting its trace volume:
 
 ```sh
@@ -356,8 +369,8 @@ The stable runtime provides:
 - Fresh-module evaluation and validation
 - Atomic activation and rollback
 - An append-only S-expression event journal plus structured JSONL spans
-- Native streaming Ollama transport, OpenAI-compatible fallback, and bounded
-  tool output
+- Native streaming Ollama and OpenAI Chat Completions transports, including
+  streamed function calls, plus bounded tool output
 - A curated live-language interface without process, filesystem, network,
   dynamic-loading, module-resolution, or `eval` functions
 - Project-confined read, search, atomic write, and exact-edit capabilities
@@ -366,6 +379,10 @@ The stable runtime provides:
   disabled, or exported from active live patches
 - Atomic named-session checkpoints with conversation, active patches,
   generation continuity, and stable trace identity
+- Session checkpoint forks plus one-child supervision with durable tool
+  ceilings, cancellation, linked causal spans, deterministic tool assertions,
+  and disabled extension proposals kept in ignored child-session state until
+  explicit promotion
 - Boundary-safe model compaction, in-flight cancellation, and explicit
   interrupted-tool retry/discard recovery
 - Hard authority validation (`agent-shell-policy` may be `deny` or `ask`, never
@@ -396,7 +413,7 @@ src/live-agent/session.scm    durable named-session checkpoints
 src/live-agent/compaction.scm boundary-safe history reduction
 src/live-agent/recovery.scm   interrupted-tool write-ahead record
 src/live-agent/extensions.scm persistent artifact lifecycle
-src/live-agent/provider.scm   native Ollama and Chat Completions adapters
+src/live-agent/provider.scm   streaming Ollama and Chat Completions adapters
 src/live-agent/prompt.scm     cache-friendly request assembly and persistence split
 src/live-agent/trace.scm      JSONL spans and optional OTLP bridge
 src/live-agent/tools.scm      stable capability checks
@@ -426,12 +443,13 @@ to evaluate—transactional, generation-attributed live behavior—but it lacks 
 of the product surface of a mature coding harness. See `docs/gaps-with-pi.md` for
 the direct comparison and the gaps on both sides.
 
-## Subagent direction
+## Subagent milestone
 
-The proposed next step is to fork a validated live generation and a bounded
-session checkpoint into an isolated child, then return trace and extension
-references for selective promotion. See [Fork the live
-image](docs/subagents.md) for the concrete contract and smallest milestone.
+`shift` can now fork a validated generation and bounded session checkpoint into
+one supervised read-only child, enforce a durable narrower tool ceiling, and
+return trace, generation, assertion, and disabled-extension references for
+selective promotion. See [Fork the live image](docs/subagents.md) for the
+contract and remaining filesystem/parallelism boundary.
 
 ## License
 

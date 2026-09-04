@@ -6,5 +6,5 @@
   (set! agent-model "gpt-5.4-mini")
   (set! agent-base-url "https://api.openai.com/v1")
   (set! agent-api-key-environment "OPENAI_API_KEY")
-  (set! agent-stream? #f)
+  (set! agent-stream? #t)
   (set! agent-thinking #f))

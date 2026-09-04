@@ -66,8 +66,8 @@
    2 source-path (read-source-file source-path)
    (list (read-source-file "extensions/openai-gateway.scm"))))
 
-(test-equal "checked-in gateway extension selects OpenAI"
-  '(openai "gpt-5.4-mini" "OPENAI_API_KEY" #f)
+(test-equal "checked-in gateway extension selects streaming OpenAI"
+  '(openai "gpt-5.4-mini" "OPENAI_API_KEY" #t)
   (list
    (generation-ref gateway-generation 'agent-provider)
    (generation-ref gateway-generation 'agent-model)

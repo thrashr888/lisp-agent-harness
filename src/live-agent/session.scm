@@ -12,6 +12,7 @@
   #:use-module (live-agent runtime)
   #:export (session-state?
             open-session!
+            fork-session!
             list-session-names
             session-name
             session-id
@@ -209,6 +210,99 @@
           (scandir root (lambda (name) (not (member name '("." ".."))))))
          string<?))))
 
+(define (fork-session! state-directory parent-name child-name)
+  (unless (and (safe-session-name? parent-name)
+               (safe-session-name? child-name))
+    (error "session names must match [A-Za-z0-9][A-Za-z0-9._-]*"))
+  (when (string=? parent-name child-name)
+    (error "child session name must differ from parent" child-name))
+  (let* ((root (session-root state-directory))
+         (parent-directory (string-append root "/" parent-name))
+         (child-directory (string-append root "/" child-name))
+         (parent-path (checkpoint-path parent-directory))
+         (child-path (checkpoint-path child-directory)))
+    (unless (file-exists? parent-path)
+      (error "parent session does not exist" parent-name))
+    (when (file-exists? child-path)
+      (error "child session already exists" child-name))
+    (when (> (stat:size (stat parent-path)) max-checkpoint-bytes)
+      (error "parent session checkpoint exceeds the 8 MiB limit" parent-path))
+    (let* ((parent
+            (call-with-input-file
+                parent-path
+              (lambda (port) (json-read (get-string-all port)))))
+           (version (and (json-object? parent)
+                         (json-object-ref parent "version" #f)))
+           (stored-name (and (json-object? parent)
+                             (json-object-ref parent "name" #f)))
+           (parent-id (and (json-object? parent)
+                           (json-object-ref parent "id" #f)))
+           (next-turn (and (json-object? parent)
+                           (json-object-ref parent "next_turn" #f)))
+           (generation-id
+            (and (json-object? parent)
+                 (json-object-ref parent "generation_id" #f)))
+           (fingerprint
+            (and (json-object? parent)
+                 (json-object-ref parent "fingerprint" #f)))
+           (history
+            (and (json-object? parent)
+                 (require-array parent "history" json-object? "message objects"
+                                max-history-messages)))
+           (patches
+            (and (json-object? parent)
+                 (require-array parent "patches" string? "Scheme source strings"
+                                max-persisted-patches))))
+      (unless (and (equal? version 1)
+                   (string? stored-name) (string=? stored-name parent-name)
+                   (string? parent-id) (not (string-null? parent-id))
+                   (integer? next-turn) (> next-turn 0)
+                   (integer? generation-id) (> generation-id 0)
+                   (string? fingerprint) (not (string-null? fingerprint)))
+        (error "invalid or mismatched parent session checkpoint" parent-path))
+      (ensure-directory! child-directory)
+      (let* ((forked-at (timestamp))
+             (parent-authority
+              (string-append parent-directory "/authority.json"))
+             (child-authority
+              (string-append child-directory "/authority.json"))
+             (authority-content
+              (and
+               (file-exists? parent-authority)
+               (begin
+                 (when (> (stat:size (stat parent-authority)) (* 64 1024))
+                   (error "session authority record is too large"
+                          parent-authority))
+                 (call-with-input-file parent-authority get-string-all))))
+             (child
+              (json-object
+               (cons "version" 1)
+               (cons "name" child-name)
+               (cons "id" (fresh-session-id))
+               (cons "created_at" forked-at)
+               (cons "updated_at" forked-at)
+               (cons "source" (json-object-ref parent "source" ""))
+               (cons "next_turn" next-turn)
+               (cons "generation_id" generation-id)
+               (cons "fingerprint" fingerprint)
+               (cons "tools"
+                     (json-object-ref parent "tools" (json-array)))
+               (cons "patches" (apply json-array patches))
+               (cons "history" (apply json-array history))
+               (cons
+                "fork"
+                (json-object
+                 (cons "parent_name" parent-name)
+                 (cons "parent_id" parent-id)
+                 (cons "parent_turn" next-turn)
+                 (cons "generation_id" generation-id)
+                 (cons "fingerprint" fingerprint)
+                 (cons "created_at" forked-at))))))
+        (when authority-content
+          (atomic-write! child-authority authority-content))
+        (atomic-write! child-path (string-append (json-write child) "\n"))
+        child))))
+
 (define (save-session! state runtime history next-turn)
   (unless (and (list? history)
                (every json-object? history)
@@ -229,6 +323,12 @@
              (cons "next_turn" next-turn)
              (cons "generation_id" (generation-id generation))
              (cons "fingerprint" (generation-fingerprint generation))
+             (cons "tools"
+                   (apply
+                    json-array
+                    (map
+                     symbol->string
+                     (generation-ref generation 'agent-tools))))
              (cons "patches" (apply json-array patches))
              (cons "history" (apply json-array history)))))
       (atomic-write!
